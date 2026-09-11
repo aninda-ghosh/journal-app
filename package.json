@@ -1,0 +1,89 @@
+{
+  "name": "journal",
+  "productName": "Journal",
+  "version": "1.0.0",
+  "description": "A photo journal for macOS that keeps your days in plain files and never touches the internet.",
+  "main": "src/main.js",
+  "author": "Aninda Ghosh",
+  "license": "MIT",
+  "scripts": {
+    "start": "electron .",
+    "test": "node tools/smoke-test.js",
+    "icon": "python3 tools/make-icon.py",
+    "dist": "electron-builder --mac --arm64",
+    "native": "cmake -S native -B native/build -DCMAKE_BUILD_TYPE=Release && cmake --build native/build -j --target transcriber",
+    "check-dictation": "node tools/whisper-check.js"
+  },
+  "devDependencies": {
+    "electron": "^44.3.0",
+    "electron-builder": "^26.15.3",
+    "ws": "^8.18.0"
+  },
+  "build": {
+    "appId": "local.journal.app",
+    "productName": "Journal",
+    "copyright": "",
+    "directories": {
+      "output": "dist",
+      "buildResources": "build"
+    },
+    "files": [
+      "src/**/*",
+      "package.json"
+    ],
+    "mac": {
+      "category": "public.app-category.lifestyle",
+      "icon": "build/icon.icns",
+      "target": [
+        {
+          "target": "dmg",
+          "arch": [
+            "arm64"
+          ]
+        }
+      ],
+      "identity": null,
+      "extendInfo": {
+        "NSHumanReadableCopyright": "",
+        "LSApplicationCategoryType": "public.app-category.lifestyle",
+        "NSMicrophoneUsageDescription": "Journal listens only to turn your words into text, using a speech model that runs entirely on this Mac. Nothing is recorded to disk or sent anywhere."
+      }
+    },
+    "dmg": {
+      "title": "Journal",
+      "contents": [
+        {
+          "x": 140,
+          "y": 200,
+          "type": "file"
+        },
+        {
+          "x": 400,
+          "y": 200,
+          "type": "link",
+          "path": "/Applications"
+        }
+      ],
+      "window": {
+        "width": 540,
+        "height": 400
+      }
+    },
+    "extraResources": [
+      {
+        "from": "native/build",
+        "to": ".",
+        "filter": [
+          "transcriber"
+        ]
+      },
+      {
+        "from": "native/models",
+        "to": "models",
+        "filter": [
+          "ggml-*.bin"
+        ]
+      }
+    ]
+  }
+}

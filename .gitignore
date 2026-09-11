@@ -1,0 +1,26 @@
+# Build tooling and output
+node_modules/
+dist/
+
+# whisper.cpp is a submodule, so it is part of the repository. What gets built
+# from it is not — and neither is the ~180MB speech model, which make.command
+# downloads on the first build. Git keeps every version of a binary forever.
+native/build/
+native/models/
+
+# Editor and tooling caches
+native/.cache/
+.cache/
+compile_commands.json
+.vscode/
+.idea/
+
+# Your actual journal never belongs in here — it lives in ~/Documents/Journal.
+# This is only a guard in case a test run or a stray copy lands in the project.
+entries/
+media/
+Journal/
+
+# Noise
+*.log
+.DS_Store

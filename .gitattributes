@@ -1,0 +1,17 @@
+# Keep text files consistent regardless of who checks them out.
+* text=auto eol=lf
+
+*.js    text
+*.json  text
+*.html  text
+*.css   text
+*.md    text
+*.py    text
+*.command text
+
+# Binary — never diff or line-ending-mangle these.
+*.icns  binary
+*.png   binary
+*.jpg   binary
+*.jpeg  binary
+*.dmg   binary

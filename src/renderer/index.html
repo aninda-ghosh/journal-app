@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy"
+      content="default-src 'none'; script-src 'self'; style-src 'self'; img-src journal: blob: data:; font-src 'self';">
+<title>Journal</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<header>
+  <span class="wordmark">Journal</span>
+  <nav>
+    <button data-view="write" aria-current="false">Write</button>
+    <button data-view="calendar" aria-current="true">Calendar</button>
+    <button data-view="entries" aria-current="false">Entries</button>
+  </nav>
+  <span class="spacer"></span>
+  <label class="search">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round">
+      <circle cx="11" cy="11" r="7"></circle><path d="M20 20l-3.5-3.5"></path>
+    </svg>
+    <input id="search" type="search" placeholder="Search entries" autocomplete="off">
+  </label>
+  <button class="btn-primary" id="new-entry">New entry</button>
+</header>
+
+<main>
+
+  <!-- ------------------------------------------------------------ write -->
+  <section class="view" id="view-write">
+    <div class="composer">
+      <div class="composer-head">
+        <input type="date" id="date">
+        <span class="editing-badge" id="editing-badge" hidden>Editing</span>
+        <span class="spacer"></span>
+        <button class="dictate" id="dictate" title="Talk instead of typing">
+          <span class="mic" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                 stroke-linecap="round" stroke-linejoin="round">
+              <rect x="9" y="2" width="6" height="11" rx="3"></rect>
+              <path d="M5 11a7 7 0 0 0 14 0"></path>
+              <path d="M12 18v3"></path>
+            </svg>
+          </span>
+          <span class="level" id="dictate-level" aria-hidden="true"></span>
+          <span id="dictate-label">Dictate</span>
+        </button>
+      </div>
+
+      <input id="title" type="text" placeholder="Title (optional)" autocomplete="off">
+      <textarea id="body" placeholder="What happened today?" spellcheck="true"></textarea>
+
+      <div class="thumbs" id="thumbs"></div>
+      <div class="dropzone" id="dropzone">
+        Drop photos here, or click to choose
+      </div>
+      <input type="file" id="file-input" accept="image/*" multiple hidden>
+
+      <div class="tag-field" id="tag-field">
+        <input id="tag-input" type="text" placeholder="Add tags…" autocomplete="off">
+      </div>
+
+      <div class="composer-foot">
+        <button class="btn-primary" id="save">Save entry</button>
+        <button class="btn-ghost" id="cancel-edit" hidden>Cancel</button>
+        <span class="hint">⌘↵ to save</span>
+      </div>
+    </div>
+  </section>
+
+  <!-- --------------------------------------------------------- calendar -->
+  <section class="view active" id="view-calendar">
+    <div class="cal-head">
+      <h2 id="cal-title">—</h2>
+      <div class="cal-nav">
+        <button id="prev-month" title="Previous month">‹</button>
+        <button id="next-month" title="Next month">›</button>
+      </div>
+      <button class="today-btn" id="this-month">Today</button>
+    </div>
+    <div class="weekdays">
+      <span>Sun</span><span>Mon</span><span>Tue</span><span>Wed</span>
+      <span>Thu</span><span>Fri</span><span>Sat</span>
+    </div>
+    <div class="cal-grid" id="cal-grid"></div>
+    <p class="cal-summary" id="cal-summary"></p>
+  </section>
+
+  <!-- ---------------------------------------------------------- entries -->
+  <section class="view" id="view-entries">
+    <div class="filters" id="filters"></div>
+    <div id="entry-list"></div>
+  </section>
+
+  <footer id="where"></footer>
+
+</main>
+
+<script src="dictation.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
