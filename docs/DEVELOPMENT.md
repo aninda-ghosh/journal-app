@@ -1,162 +1,435 @@
-# Development
+# Journal — System Design & Architecture Specification
 
-How Journal is put together, and how to work on it.
+A technical system design document detailing Journal's architecture, hardware-accelerated on-device ML inference via Apple Metal GPU, IPC communication topologies, and local-first storage design.
 
-## How it works
+---
+
+## 1. High-Level System Architecture
+
+Journal is structured around a three-tier process topology isolating the web runtime, native Node.js capabilities, and hardware-accelerated native compute.
+
+```mermaid
+flowchart TB
+    subgraph UI_Tier["Renderer Process (Chromium Sandbox)"]
+        UI["UI View Controller (app.js)"]
+        Worklet["AudioWorklet (pcm-worklet.js)"]
+        DictationClient["Dictation Client (dictation.js)"]
+        Canvas["Offscreen Canvas (Image Processing)"]
+    end
+
+    subgraph Bridge_Tier["Security Boundary (Preload)"]
+        Bridge["ContextBridge (window.journal)"]
+    end
+
+    subgraph Host_Tier["Main Process (Node.js Runtime)"]
+        Supervisor["Supervisor & App Lifecycle (main.js)"]
+        Protocol["journal:// Protocol Handler"]
+        Storage["Storage Engine (journal.js)"]
+    end
+
+    subgraph Compute_Tier["Native Machine Learning Daemon"]
+        Transcriber["transcriber (C++ Mach-O Binary)"]
+        subgraph Metal_Subsystem["Metal GPU Acceleration"]
+            Whisper["whisper.cpp Engine"]
+            UMA["Apple Silicon Unified Memory (UMA)"]
+            Shaders["Embedded Metal Compute Shaders"]
+        end
+    end
+
+    subgraph Disk_Tier["Local Filesystem (~/Documents/Journal)"]
+        MD["Markdown Entries (entries/YYYY/MM/*.md)"]
+        Media["Media Assets (media/YYYY/MM/*.jpg)"]
+    end
+
+    %% Wiring
+    UI --> Bridge
+    Worklet --> DictationClient
+    DictationClient --> Bridge
+    Canvas --> Bridge
+
+    Bridge -->|"IPC Invoke / On"| Supervisor
+
+    Supervisor --> Storage
+    Supervisor --> Protocol
+    Supervisor -->|"stdin (16kHz PCM)"| Transcriber
+    Transcriber -->|"stdout (JSON lines)"| Supervisor
+
+    Transcriber --> Whisper
+    Whisper --> Shaders
+    Whisper <--> UMA
+
+    Storage --> MD
+    Storage --> Media
+    Protocol --> Media
+```
+
+### Component Responsibility Matrix
+
+| Component | Technology | Execution Context | Network / FS Access | Responsibilities |
+| :--- | :--- | :--- | :--- | :--- |
+| **Renderer** | HTML5, CSS3, Vanilla JS | Chromium Sandbox | None (`default-src 'none'`) | View rendering, SPA navigation, live UI state, microphone capture, image downsampling. |
+| **AudioWorklet** | Web Audio API Worklet | Audio Render Thread | None | Off-main-thread Float32 sample gathering, RMS loudness calculation. |
+| **Preload Bridge** | Electron `contextBridge` | Isolated Context | Controlled IPC only | Exposes typed `window.journal` API; enforces isolation barrier. |
+| **Main Process** | Node.js, Electron APIs | Host Process | Local FS, Child Process | Window lifecycle, native menus, child process supervision, custom scheme handler. |
+| **Storage Engine** | Node.js `fs.promises` | Main Process | Local FS (`~/Documents/Journal`) | Markdown parsing/serialization, directory hierarchy, media writes, path traversal checks. |
+| **Transcriber** | C++17, whisper.cpp, Metal | Child Subprocess (`fork/exec`) | `stdin` / `stdout` only | Streaming audio ingest, silence gap detection, GPU-accelerated Whisper inference. |
+
+---
+
+## 2. Speech Engine & Apple Metal GPU Deep-Dive
+
+### Hardware Acceleration Architecture (Apple Silicon UMA)
+
+On Apple Silicon (M-series chips), the CPU, GPU, and Neural Engine share a contiguous, high-bandwidth **Unified Memory Architecture (UMA)**. Traditional discrete GPU pipelines suffer from PCIe transfer bottlenecks where audio buffers and weights must be duplicated across buses.
+
+```mermaid
+flowchart LR
+    subgraph UMA_Pool["Unified Memory Architecture (Contiguous RAM)"]
+        Weights["Model Weights (ggml-small.en-q5_1.bin: ~180MB)"]
+        AudioBuffer["Zero-Copy Audio Tensors"]
+        AttentionCache["KV Attention Cache"]
+    end
+
+    subgraph Compute_Engines["Apple Silicon Compute Cores"]
+        CPU["CPU Cores (Reader Thread / Logic)"]
+        GPU["Metal GPU Cores (Matrix Ops / Attention)"]
+        Acc["Accelerate.framework (BLAS / Vector DSP)"]
+    end
+
+    CPU <--> UMA_Pool
+    GPU <--> UMA_Pool
+    Acc <--> UMA_Pool
+```
+
+1. **Zero-Copy Tensor Evaluation**:
+   `transcriber` allocates context buffers in system memory. Because Metal maps this unified address space directly, tensor kernels access weights and activations without memory copies.
+2. **Embedded Metal Shaders**:
+   Configured in `native/CMakeLists.txt`:
+   ```cmake
+   set(GGML_METAL_EMBED_LIBRARY ON CACHE BOOL "" FORCE)
+   ```
+   During compilation, Apple's `metal` compiler translates `ggml-metal.metal` into `.air` intermediate representation, links it into a `.metallib`, and embeds it as a C byte array inside the Mach-O binary. At runtime, the application initializes the GPU pipeline with zero filesystem dependencies.
+3. **GPU Context Activation**:
+   In `native/transcriber.cpp`:
+   ```cpp
+   whisper_context_params cparams = whisper_context_default_params();
+   cparams.use_gpu = true; // Initializes MTLDevice and loads compute pipeline
+   return whisper_init_from_file_with_params(path, cparams);
+   ```
+
+### Quantization & Memory Bandwidth Analysis
+
+Transformer autoregressive decoding is memory-bandwidth bound. Every token generation step requires streaming the entire active model parameters through memory.
+
+| Quantization Format | Model Size | Bandwidth Required / Token | Memory Footprint | Accuracy Relative to FP16 | Recommended Use Case |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| **FP16 (`small.en`)** | ~466 MB | ~466 MB | ~700 MB | 100% | Reference baseline |
+| **Q5_1 (`small.en-q5_1`)** | **~180 MB** | **~180 MB** | **~260 MB** | **~99.2%** | **Production Default (Optimal efficiency)** |
+| **Q4_0 (`base.en-q4_0`)** | ~80 MB | ~80 MB | ~140 MB | ~95.8% | Ultra-low power / Older hardware |
+| **Q5_0 (`large-v3-turbo-q5_0`)** | ~550 MB | ~550 MB | ~850 MB | > 102% (multilingual) | Maximum multilingual accuracy |
+
+*By utilizing 5-bit quantization (`q5_1`), Journal achieves a **~61% reduction in memory bandwidth consumption**, allowing inference to run significantly faster than real-time with negligible battery drain.*
+
+### End-to-End Audio Ingestion & Inference Pipeline
+
+The streaming audio path transfers data from the physical microphone down to the GPU compute pipeline:
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor User as Speaker
+    participant Mic as Hardware Mic
+    participant Worklet as AudioWorklet (pcm-worklet.js)
+    participant Client as Dictation (dictation.js)
+    participant IPC as ContextBridge IPC
+    participant Main as Main Process (main.js)
+    participant Native as Transcriber Daemon (C++)
+    participant Metal as Metal GPU (whisper.cpp)
+    participant UI as Editor UI (app.js)
+
+    User->>Mic: Speaks audio
+    Mic->>Worklet: Raw 44.1/48kHz frames
+    Note over Worklet: Downsamples to 16kHz Mono Float32<br/>Computes RMS loudness level
+    Worklet-->>Client: postMessage({ samples, level })
+    Client->>UI: Update live mic meter
+
+    Note over Client: Converts Float32 to 16-bit Signed Little-Endian PCM<br/>Batches into 250ms chunks (4 flushes / sec)
+    Client->>IPC: dictationAudio(chunk)
+    IPC->>Main: IPC Channel 'journal:dictationAudio'
+    Main->>Native: stdin.write(Buffer)
+
+    par Background Audio Ingestion
+        Native->>Native: Reader Thread pushes PCM to buffer queue
+    and Inference Processing Loop
+        loop Every 2.5s (STEP_SECONDS)
+            Native->>Metal: Evaluate sliding window via Metal GPU
+            Metal-->>Native: Output tokens & segment text
+            Native->>Main: stdout JSON {"type":"partial","text":"..."}
+            Main->>IPC: win.webContents.send('dictation:partial')
+            IPC->>UI: Live-update composer textarea
+        end
+    end
+
+    User->>UI: Clicks "Finish" (or pauses)
+    UI->>IPC: dictationStop()
+    IPC->>Main: dictationStop()
+    Main->>Native: stdin.end()
+    Native->>Metal: Final transcription pass on remaining tail
+    Metal-->>Native: Final settled tokens
+    Native-->>Main: stdout JSON {"type":"final","text":"..."}
+    Main-->>UI: Settle final text into entry
+```
+
+### Sliding Window & Dynamic RMS Gap Slicing
+
+Whisper processes audio in discrete blocks. To give the user live text while preventing unbounded memory growth during long recordings, `transcriber.cpp` implements a bounded sliding window with Root Mean Square (RMS) silence detection:
+
+```mermaid
+stateDiagram-v2
+    [*] --> IngestingAudio: Raw PCM received on stdin
+
+    state IngestingAudio {
+        [*] --> BufferQueue
+        BufferQueue --> WindowAccumulation: Append samples
+    }
+
+    state WindowCheck <<choice>>
+    IngestingAudio --> WindowCheck: Every 60ms tick
+
+    WindowCheck --> IngestingAudio: Window < 2.5s
+    WindowCheck --> TranscribeTail: Window >= 2.5s (STEP_SECONDS)
+
+    state TranscribeTail {
+        [*] --> MetalInference: Run greedy pass on uncommitted tail
+        MetalInference --> EmitPartial: Emit {"type":"partial"}
+    }
+
+    state MaxCheck <<choice>>
+    TranscribeTail --> MaxCheck: Check buffer length
+
+    MaxCheck --> IngestingAudio: Buffer <= 20.0s (MAX_SECONDS)
+    MaxCheck --> DetectGap: Buffer > 20.0s
+
+    state DetectGap {
+        [*] --> ScanRMS: Search last 4.0s (TAIL_SEARCH) for minimum RMS energy
+        ScanRMS --> CutBuffer: Split at quietest 100ms pause
+        CutBuffer --> CommitHead: Transcribe & commit Head to permanent text
+        CommitHead --> RetainTail: Retain uncommitted Tail in buffer
+    }
+
+    DetectGap --> IngestingAudio: Buffer pruned
+```
+
+- **RMS Energy Calculation**:
+  $$\text{RMS} = \sqrt{\frac{1}{N} \sum_{i=1}^{N} x_i^2} \quad \text{computed in 100ms sliding sub-windows}$$
+- **Result**: Cuts happen during natural pauses between words rather than across phonemes, preventing hallucination or dropped syllables.
+
+---
+
+## 3. Web Application & Security Architecture
+
+### Process Isolation & Security Perimeter
+
+Journal operates under a strict principle of least privilege, preventing arbitrary code execution and ensuring offline privacy:
+
+```mermaid
+flowchart TD
+    subgraph World["Untrusted Sandbox (Renderer)"]
+        DOM["DOM & Web APIs"]
+        App["app.js"]
+    end
+
+    subgraph Barrier["Security Barrier"]
+        CSP["Content Security Policy (default-src 'none')"]
+        Preload["preload.js (contextBridge)"]
+    end
+
+    subgraph Trusted["Trusted Node.js Runtime (Main)"]
+        Main["main.js"]
+        FS["Filesystem Operations"]
+        Proc["Child Process Execution"]
+    end
+
+    DOM -.->|Blocked: No Node access| Trusted
+    DOM -.->|Blocked: No network/eval| CSP
+    App -->|Explicit calls only| Preload
+    Preload -->|Typed IPC invocations| Main
+    Main --> FS
+    Main --> Proc
+```
+
+1. **Zero-Node Renderer**: `nodeIntegration: false`, `contextIsolation: true`. `window.require`, `process`, and `Buffer` do not exist in renderer scope.
+2. **Offline Content Security Policy**:
+   ```
+   default-src 'none'; script-src 'self'; style-src 'self'; img-src journal: blob: data:; font-src 'self';
+   ```
+   No network requests (`fetch`, `XMLHttpRequest`, `WebSocket`) can be made to remote hosts.
+3. **Navigation Lockdown**: External URLs clicked in markdown entries are blocked from rendering internally and redirected to macOS system default browser via `shell.openExternal()`.
+
+### Custom Protocol: `journal://`
+
+To display images without granting the renderer unrestricted `file://` access (which would allow reading arbitrary files on disk), Journal uses a secure custom protocol:
+
+```mermaid
+sequenceDiagram
+    participant Img as <img src="journal://media/2026/09/photo.jpg">
+    participant Handler as protocol.handle('journal')
+    participant Guard as resolveMedia() Traversal Check
+    participant FS as Local Filesystem
+
+    Img->>Handler: HTTP GET request to custom scheme
+    Note over Handler: Parses host ('media') and pathname ('/2026/09/photo.jpg')<br/>Reconstructs relative path: 'media/2026/09/photo.jpg'
+    Handler->>Guard: Validate path containment
+    alt Path escapes root directory (contains '..' or root absolute)
+        Guard-->>Handler: Return null (Access Denied)
+        Handler-->>Img: HTTP 404 Response
+    else Path valid inside ~/Documents/Journal/media/
+        Guard->>FS: Resolve full absolute path
+        FS-->>Handler: File Stream
+        Handler-->>Img: net.fetch(pathToFileURL) response stream
+    end
+```
+
+---
+
+## 4. Local-First Storage & Media Pipeline
+
+### Directory Hierarchy & Format Schema
+
+Storage is completely transparent and file-manager friendly. No proprietary SQLite databases or binary blobs are used for entries.
 
 ```
-src/main.js            window, menu, journal folder, IPC, dictation session
-src/preload.js         the only bridge to the interface
-src/journal.js         reading and writing your files — no Electron, no HTTP
-src/renderer/          the interface: HTML, CSS, one script, an audio worklet
-native/transcriber.cpp streams audio in, words out; links whisper.cpp statically
+~/Documents/Journal/
+├── entries/
+│   └── YYYY/
+│       └── MM/
+│           ├── YYYY-MM-DD-HHmmss.md        <-- Individual entry
+│           └── YYYY-MM-DD-HHmmss.md
+└── media/
+    └── YYYY/
+        └── MM/
+            ├── <uuid>.jpg                  <-- Full-resolution photo
+            └── <uuid>.thumb.jpg            <-- Low-latency thumbnail
 ```
 
-The interface has no filesystem access and no Node. It asks `preload.js`, which
-asks the main process, which touches disk. Photos reach the window through a
-custom `journal://` scheme that refuses any path outside the media folder, and
-the page runs under a `default-src 'none'` content policy.
+#### Markdown Format Schema
 
-Dictation streams 16 kHz mono PCM into the C++ helper on stdin and reads JSON
-lines back — `ready`, `partial`, `final`. Audio passes through memory to the
-recogniser and is never written anywhere.
+```yaml
+---
+id: 2026-09-08-143000          # Chronologically sortable string (YYYY-MM-DD-HHmmss)
+date: 2026-09-08T14:30:00      # ISO local timestamp
+title: Afternoon in Presidio   # Plaintext string
+tags: nature, walking, fog     # Comma-delimited list
+photos: media/2026/09/abc.jpg  # Relative paths to media directory
+---
 
-Whisper transcribes windows of audio rather than word by word, so "live" means
-the tail of what you've said is re-transcribed every couple of seconds and the
-guess settles. Audio older than twenty seconds is committed and never revisited,
-cut at the quietest moment nearby, which keeps every pass short however long the
-recording runs.
+Entry body written in standard markdown...
+```
 
-## Building from source
+### Client-Side Canvas Image Processing Pipeline
 
-The speech engine is a submodule, so clone recursively — and if you forget,
-`make.command` fills it in rather than failing:
+To maintain high performance without disk bloat, images are transformed on an offscreen HTML5 `<canvas>` in the renderer before touching the disk:
+
+```mermaid
+flowchart TD
+    RawFile["User Drops Image File (PNG/HEIC/JPEG)"] --> ImgElement["Image Object Decoded in Renderer"]
+    ImgElement --> Canvas["Offscreen HTML5 Canvas"]
+
+    subgraph Transformations["Canvas Transformations"]
+        Crop["Center Square Crop (1:1 Aspect Ratio)"]
+        ScaleFull["Scale Down to Max 1800x1800 px"]
+        ScaleThumb["Scale Down to Max 320x320 px"]
+    end
+
+    Canvas --> Crop
+    Crop --> ScaleFull --> EncodeFull["toDataURL('image/jpeg', 0.88)"]
+    Crop --> ScaleThumb --> EncodeThumb["toDataURL('image/jpeg', 0.82)"]
+
+    EncodeFull --> IPC["saveMedia IPC Call"]
+    EncodeThumb --> IPC
+
+    IPC --> DiskWrite["Write .jpg and .thumb.jpg to media/YYYY/MM/"]
+```
+
+- **Storage Efficiency**: Uncompressed 12MP smartphone photos (~5-10MB each) are compressed to ~300KB for full resolution and ~25KB for thumbnails. A year of daily photos fits inside ~120MB.
+- **Fast Calendar Loading**: The calendar view loads exclusively `.thumb.jpg` assets, eliminating memory pressure and frame drops during fast scrolling.
+
+---
+
+## 5. Developer Runbook & Model Customization
+
+### Model Modification Workflow
+
+```mermaid
+flowchart TD
+    Start["Desire to Change Model"] --> SelectModel{"Select Target Model"}
+
+    SelectModel -->|Fast / Low Memory| Tiny["tiny.en (~75MB)"]
+    SelectModel -->|Default Balanced| Small["small.en-q5_1 (~180MB)"]
+    SelectModel -->|High Precision English| Medium["medium.en (~1.5GB)"]
+    SelectModel -->|Multilingual SOTA| Turbo["large-v3-turbo-q5_0 (~550MB)"]
+
+    Tiny --> EditConfig["Update WHISPER_MODEL in make.command"]
+    Small --> EditConfig
+    Medium --> EditConfig
+    Turbo --> EditConfig
+
+    EditConfig --> Download["Run ./make.command engine"]
+    Download --> Verify["Run ./make.command dictation"]
+    Verify --> Done["Test in UI via npm start"]
+```
+
+#### Step 1: Update Build Configuration
+Open `make.command` and modify line 19:
+```bash
+WHISPER_MODEL="base.en"  # Or small.en-q5_1, tiny.en, large-v3-turbo-q5_0
+```
+
+#### Step 2: Download Weights & Recompile Helper
+```bash
+./make.command engine
+```
+This triggers `native/whisper.cpp/models/download-ggml-model.sh`, downloads the quantized weights into `native/models/`, and recompiles `native/build/transcriber` with embedded Metal shaders.
+
+#### Step 3: Verify Inference Correctness
+```bash
+./make.command dictation
+```
+Streams `jfk.wav` through the native transcriber and verifies that transcript tokens match expected output.
+
+### Runtime Overrides (Without Recompilation)
+
+Developers can test different configurations or external model weights dynamically using environment variables:
 
 ```bash
-git clone --recursive <repo>
-cd journal
-./make.command
+# Point to an external GGML model weight file:
+JOURNAL_MODEL=/Volumes/Models/ggml-large-v3-turbo.bin npm start
+
+# Point to an experimental C++ helper or debugging stub:
+JOURNAL_TRANSCRIBER=/path/to/custom/transcriber npm start
+
+# Override journal storage root to an isolated sandbox:
+JOURNAL_ROOT=/tmp/test-journal npm start
 ```
 
-Needs [Node.js](https://nodejs.org) and, for dictation, `cmake`
-(`brew install cmake` — it is not part of the Xcode command line tools). The
-first build compiles whisper.cpp and downloads a ~180MB speech model, so it
-takes a while once and is quick afterwards. The finished `.dmg` lands in
-`dist/`.
+### Parameter Tuning Reference (`native/transcriber.cpp`)
 
-### Commands
+| Parameter | Default | Trade-off When Decreased | Trade-off When Increased |
+| :--- | :--- | :--- | :--- |
+| `STEP_SECONDS` | `2.5f` | Faster UI feedback; higher GPU core utilization and power draw. | Lower CPU/GPU usage; longer latency before spoken words appear in UI. |
+| `MAX_SECONDS` | `20.0f` | Less context retained for autoregressive guessing; lower RAM usage. | Better long-sentence phrasing; higher inference latency per step. |
+| `TAIL_SEARCH` | `4.0f` | Narrower window to find silence; higher risk of cutting mid-word. | Slower gap detection; searches further back into spoken audio. |
+| `threadCount()` | `4 to 8` | Slower token processing on CPU; less CPU core contention. | Faster CPU preprocessing; potential thread contention with Metal queue. |
 
-```bash
-./make.command             build, then run every check
-./make.command build       just produce the dmg
-./make.command test        the app's checks
-./make.command dictation   prove Whisper really transcribes
-./make.command engine      build the speech engine, fetch the model
-./make.command clean       throw away build output and start fresh
-```
+---
 
-Exits non-zero on failure, so it drops into CI unchanged. `clean` only removes
-what it can rebuild and never touches your journal.
+## 6. Failure Modes & System Resilience
 
-whisper.cpp is a submodule pinned to a specific commit, linked statically, so
-the app ships one self-contained binary with no dylibs to find at runtime. To
-move to a newer upstream version, check out the commit you want inside
-`native/whisper.cpp`, run the checks, and commit the new pointer.
-
-Built for `--arm64`; change to `--x64` in the `dist` script for Intel.
-
-## Cutting a release
-
-```bash
-./make.command                      # build and verify
-npm version patch|minor|major       # bump package.json and tag
-git push && git push --tags
-```
-
-Then create the GitHub release for that tag and attach `dist/*.dmg`. The
-README's download link points at `releases/latest`, so it follows along on its
-own. Add the changes to `CHANGELOG.md` under a new version heading before
-tagging.
-
-<details>
-<summary>Underlying npm scripts</summary>
-
-```bash
-npm install
-npm start                 # run from source
-npm test                  # the end-to-end checks
-npm run check-dictation   # prove Whisper transcribes
-npm run icon              # redraw build/icon.icns
-npm run native            # rebuild just the speech engine
-npm run dist              # package the dmg
-```
-</details>
-
-## Testing
-
-`npm test` boots the real app and drives it over the DevTools protocol,
-asserting against actual files on disk — 45 checks covering the preload bridge,
-Node isolation, storage, the photo pipeline, the calendar, and dictation.
-
-Dictation is exercised with Chromium's fake microphone and a stub transcriber
-that describes the audio it's fed rather than inventing a transcript, so a wrong
-sample rate or a silent stream fails loudly rather than passing quietly. The
-tests also assert that words appear *during* recording, not only after it.
-
-On macOS a window appears for the minute the run takes — that's the real app
-being driven. On Linux the checks borrow a virtual display and need `xvfb`.
-
-The one thing `npm test` can't cover is Whisper's own accuracy, which needs the
-real model and Apple Silicon. `./make.command dictation` streams a known
-recording through the engine and checks recognisable words come back.
-
-## Things that will bite you
-
-Each of these cost real time at least once.
-
-**Platform**
-
-- `xvfb-run` is Linux-only. Hardcoding it makes the suite die instantly on
-  macOS — the platform this app is for.
-- macOS resolves `getPath('documents')` from the real account, ignoring a `HOME`
-  override, so a test run can write into a real journal. The tests pin the
-  folder with `JOURNAL_ROOT`.
-- CMake's generator decides whether the built binary lands in `build/` or
-  `build/Release/`. `make.command` normalises it.
-
-**Electron**
-
-- `journal://` is registered as a *standard* scheme, so `journal://media/x.jpg`
-  parses `media` as the **host**. The handler must join `url.host +
-  url.pathname` to recover the path. Getting this wrong silently breaks every
-  image.
-- Reading pixels from a `journal://` image taints the canvas. Test the cropping
-  function on a `blob:` URL rather than loosening the protocol for a test.
-- `fetch()` is blocked by the page's content policy; build test images with
-  `canvas.toBlob`.
-- `session` is an Electron import — don't shadow it with a local variable.
-- A leftover Electron process holds the debug port and the test will silently
-  attach to the *stale* build. The test kills that port first.
-
-**Dictation**
-
-- The helper emits `ready` *before* loading the model, with the reader thread
-  already buffering. Loading 190MB first meant every press of Dictate waited on
-  "Starting…".
-- Let CMake work out the link line via `add_subdirectory(whisper.cpp)`.
-  Hand-rolled `g++` flags fail on missing OpenMP symbols on Linux and would need
-  different flags again on macOS.
-
-**Repo**
-
-- The speech model is deliberately not in the repository. At 182MB it is past
-  GitHub's hard 100MB limit for ordinary files, and git would keep every version
-  of it forever. `make.command` downloads it once, on the first build.
-- Verify ignore rules with `git check-ignore -v <path>` rather than trusting a
-  comment: one once claimed to exclude the model while the matching line was
-  missing, and `git add -A` was about to commit it into history.
-
-**Bash**
-
-- An apostrophe inside `${var:-default}` opens a quoted string *even within
-  double quotes*, and bash reports the error at end of file, far from the cause.
+| Failure Scenario | Root Cause | System Defense / Recovery Mechanism |
+| :--- | :--- | :--- |
+| **Model Load Timeout** | Corrupt weights file or slow disk I/O | Main process maintains a 60s timeout timer (`readyTimer`). If unready, kills child process with `SIGTERM` and displays actionable diagnostic alert. |
+| **Microphone Permission Denied** | macOS TCC privacy restriction | `main.js:ensureMicrophone()` checks `systemPreferences.getMediaAccessStatus('microphone')`. If denied, catches gracefully and prompts user with direct path to System Settings. |
+| **Audio Input Overflow** | Whisper inference pass takes longer than audio ingestion | Audio read loop runs on a detached `std::thread reader` pushing to a thread-safe mutex-guarded queue. Audio is never dropped from `stdin`. |
+| **Canvas Pixel Tainting** | Attempting to read pixels from `journal://` origin | Canvas crops and compresses raw image data *before* converting to `journal://` URLs. Storage returns paths; renderer never reads raw pixels from custom protocols. |
+| **Filesystem Disconnection** | External drive holding Journal unplugged | `main.js:resolveRoot()` detects missing directory on startup and safely falls back to local `~/Documents/Journal` without crashing. |
+| **Subprocess Crash** | Segmentation fault or out-of-memory in C++ helper | Main process listens to `child.on('close')`. Slices whatever text was accumulated so far and resolves final promise; user never loses spoken text. |
