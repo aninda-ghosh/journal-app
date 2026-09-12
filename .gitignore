@@ -19,18 +19,14 @@ compile_commands.json
 
 # iOS build artifacts
 **/DerivedData/
-*.xcodeproj/**/xcuserdata/
-*.xcworkspace/**/xcuserdata/
-.cache/
-compile_commands.json
-.vscode/
-.idea/
+**/xcuserdata/
+*.xcuserstate
 
 # Your actual journal never belongs in here — it lives in ~/Documents/Journal.
 # This is only a guard in case a test run or a stray copy lands in the project.
-entries/
-media/
-Journal/
+/entries/
+/media/
+/Journal/
 
 # Noise
 *.log
