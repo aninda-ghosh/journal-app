@@ -1,7 +1,7 @@
 {
   "name": "journal",
   "productName": "Journal",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "description": "A photo journal for macOS that keeps your days in plain files and never touches the internet.",
   "main": "src/main.js",
   "author": "Aninda Ghosh",

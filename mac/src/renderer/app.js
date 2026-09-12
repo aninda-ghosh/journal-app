@@ -39,9 +39,15 @@ function todayKey() {
   return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate());
 }
 
-/** 'YYYY-MM-DD' for an entry (its id always starts with the date). */
+/** 'YYYY-MM-DD' for an entry (its id or date always starts with the date). */
 function dayKeyOf(entry) {
-  return entry.id.slice(0, 10);
+  if (entry.id && /^\d{4}-\d{2}-\d{2}/.test(entry.id)) {
+    return entry.id.slice(0, 10);
+  }
+  if (entry.date && /^\d{4}-\d{2}-\d{2}/.test(entry.date)) {
+    return entry.date.slice(0, 10);
+  }
+  return (entry.id || entry.date || '').slice(0, 10);
 }
 
 /**
@@ -503,8 +509,10 @@ function renderCalendar() {
       if (dayEntries.length) {
         state.dayFilter = key;
         state.search = '';
+        state.activeTags.clear();
         $('#search').value = '';
         switchView('entries');
+        render();
       } else {
         clearComposer();
         $('#date').value = key;
@@ -661,7 +669,13 @@ function render() {
 // ---------------------------------------------------------------- wiring
 
 document.querySelectorAll('nav button').forEach((button) => {
-  button.addEventListener('click', () => switchView(button.dataset.view));
+  button.addEventListener('click', () => {
+    if (button.dataset.view === 'entries' && state.dayFilter) {
+      state.dayFilter = null;
+      render();
+    }
+    switchView(button.dataset.view);
+  });
 });
 
 $('#new-entry').addEventListener('click', () => {
@@ -954,13 +968,20 @@ window.journal.onMenu((action) => {
       break;
     case 'view-calendar': switchView('calendar'); break;
     case 'view-write': switchView('write'); break;
-    case 'view-entries': switchView('entries'); break;
+    case 'view-entries':
+      if (state.dayFilter) { state.dayFilter = null; render(); }
+      switchView('entries');
+      break;
   }
 });
 
 window.journal.onMoved(async (root) => {
   toast('Journal moved');
   await showLocation(root);
+  await loadEntries();
+});
+
+window.journal.onChanged(async () => {
   await loadEntries();
 });
 

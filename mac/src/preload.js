@@ -66,5 +66,10 @@ contextBridge.exposeInMainWorld('journal', {
     ipcRenderer.on('journal:moved', (_event, root) => handler(root));
   },
 
+  /** Fired when entries on disk have been added, modified, or removed. */
+  onChanged: (handler) => {
+    ipcRenderer.on('journal:changed', () => handler());
+  },
+
   platform: process.platform
 });

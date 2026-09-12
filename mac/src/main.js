@@ -24,6 +24,29 @@ const IS_MAC = process.platform === 'darwin';
 
 let win = null;
 let config = { root: null, window: null };
+let dirWatcher = null;
+let watcherDebounceTimer = null;
+
+function watchJournalFolder(root) {
+  if (dirWatcher) {
+    try { dirWatcher.close(); } catch {}
+    dirWatcher = null;
+  }
+  if (!root) return;
+  const entriesDir = path.join(root, 'entries');
+  try {
+    if (!fs.existsSync(entriesDir)) return;
+    dirWatcher = fs.watch(entriesDir, { recursive: true }, (_eventType, filename) => {
+      if (filename && (filename.startsWith('.') || filename.endsWith('.icloud'))) return;
+      clearTimeout(watcherDebounceTimer);
+      watcherDebounceTimer = setTimeout(() => {
+        toRenderer('journal:changed');
+      }, 300);
+    });
+  } catch (err) {
+    console.warn('Could not watch entries folder:', err.message);
+  }
+}
 
 // ------------------------------------------------------------------ config
 
@@ -59,6 +82,7 @@ async function resolveRoot() {
     const pinned = path.resolve(process.env.JOURNAL_ROOT);
     journal.setRoot(pinned);
     await journal.ensureDirs();
+    watchJournalFolder(pinned);
     return pinned;
   }
 
@@ -79,6 +103,7 @@ async function resolveRoot() {
 
   journal.setRoot(root);
   await journal.ensureDirs();
+  watchJournalFolder(root);
   return root;
 }
 
@@ -211,6 +236,7 @@ async function chooseFolder() {
     await saveConfig();
     journal.setRoot(target);
     await journal.ensureDirs();
+    watchJournalFolder(target);
     toRenderer('journal:moved', target);
     return target;
   } catch (err) {

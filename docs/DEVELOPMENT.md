@@ -1,78 +1,112 @@
 # Journal — System Design & Architecture Specification
 
-A technical system design document detailing Journal's architecture, hardware-accelerated on-device ML inference via Apple Metal GPU, IPC communication topologies, and local-first storage design.
+A technical system design document detailing Journal's cross-platform architecture, hardware-accelerated on-device ML inference (Apple Metal GPU on macOS and Apple Neural Engine on iOS), IPC topologies, local-first storage design, and zero-cost iCloud Drive synchronization.
 
 ---
 
 ## 1. High-Level System Architecture
 
-Journal is structured around a three-tier process topology isolating the web runtime, native Node.js capabilities, and hardware-accelerated native compute.
+Journal is organized as a unified monorepo supporting two native clients sharing an identical, zero-database local file schema:
+1. **macOS Desktop App (`mac/`)**: Three-tier architecture isolating a sandboxed Chromium renderer, native Node.js process supervisor, and embedded Metal GPU C++ ML inference daemon.
+2. **iOS Companion App (`ios/`)**: Native SwiftUI application utilizing Apple Neural Engine (ANE) on-device speech recognition, security-scoped bookmarks, and reactive ViewModels.
+3. **Storage Tier**: Plain Markdown files with frontmatter (`entries/YYYY/MM/*.md`) and downsampled JPEG media (`media/YYYY/MM/*.jpg`), synchronized bidirectionally across devices via iCloud Drive.
 
 ```mermaid
 flowchart TB
-    subgraph UI_Tier["Renderer Process (Chromium Sandbox)"]
-        UI["UI View Controller (app.js)"]
-        Worklet["AudioWorklet (pcm-worklet.js)"]
-        DictationClient["Dictation Client (dictation.js)"]
-        Canvas["Offscreen Canvas (Image Processing)"]
-    end
+    subgraph Mac_Platform["macOS Desktop Application (mac/)"]
+        subgraph UI_Tier["Renderer Process (Chromium Sandbox)"]
+            UI["UI View Controller (app.js)"]
+            Worklet["AudioWorklet (pcm-worklet.js)"]
+            DictationClient["Dictation Client (dictation.js)"]
+            Canvas["Offscreen Canvas (Image Processing)"]
+        end
 
-    subgraph Bridge_Tier["Security Boundary (Preload)"]
-        Bridge["ContextBridge (window.journal)"]
-    end
+        subgraph Bridge_Tier["Security Boundary (Preload)"]
+            Bridge["ContextBridge (window.journal)"]
+        end
 
-    subgraph Host_Tier["Main Process (Node.js Runtime)"]
-        Supervisor["Supervisor & App Lifecycle (main.js)"]
-        Protocol["journal:// Protocol Handler"]
-        Storage["Storage Engine (journal.js)"]
-    end
+        subgraph Host_Tier["Main Process (Node.js Runtime)"]
+            Supervisor["Supervisor & App Lifecycle (main.js)"]
+            Watcher["Directory Watcher (fs.watch)"]
+            Protocol["journal:// Protocol Handler"]
+            Storage["Storage Engine (journal.js)"]
+        end
 
-    subgraph Compute_Tier["Native Machine Learning Daemon"]
-        Transcriber["transcriber (C++ Mach-O Binary)"]
-        subgraph Metal_Subsystem["Metal GPU Acceleration"]
-            Whisper["whisper.cpp Engine"]
-            UMA["Apple Silicon Unified Memory (UMA)"]
-            Shaders["Embedded Metal Compute Shaders"]
+        subgraph Compute_Tier["Native Machine Learning Daemon"]
+            Transcriber["transcriber (C++ Mach-O Binary)"]
+            subgraph Metal_Subsystem["Metal GPU Acceleration"]
+                Whisper["whisper.cpp Engine"]
+                UMA["Apple Silicon Unified Memory (UMA)"]
+                Shaders["Embedded Metal Compute Shaders"]
+            end
         end
     end
 
-    subgraph Disk_Tier["Local Filesystem (~/Documents/Journal)"]
+    subgraph iOS_Platform["iOS Companion Application (ios/)"]
+        subgraph iOS_UI["SwiftUI Views"]
+            ContentView["Navigation & Header (ContentView.swift)"]
+            WriteView["Composer & Live Mic (WriteView.swift)"]
+            CalView["Calendar Grid (CalendarView.swift)"]
+            FeedView["Entries Feed (EntriesView.swift)"]
+        end
+
+        subgraph iOS_Core["Core Architecture"]
+            VM["JournalViewModel (@MainActor)"]
+            iOS_Storage["JournalStorage (Security-Scoped Bookmarks)"]
+            ImgProc["ImageProcessor (1:1 Center-Crop)"]
+            DictationEngine["DictationEngine (Continuous ANE STT)"]
+        end
+    end
+
+    subgraph Storage_Tier["Shared Local Filesystem / iCloud Drive"]
         MD["Markdown Entries (entries/YYYY/MM/*.md)"]
         Media["Media Assets (media/YYYY/MM/*.jpg)"]
     end
 
-    %% Wiring
+    %% Mac Wiring
     UI --> Bridge
     Worklet --> DictationClient
     DictationClient --> Bridge
     Canvas --> Bridge
-
     Bridge -->|"IPC Invoke / On"| Supervisor
-
     Supervisor --> Storage
+    Supervisor --> Watcher
+    Watcher -.->|"journal:changed"| Bridge
     Supervisor --> Protocol
     Supervisor -->|"stdin (16kHz PCM)"| Transcriber
     Transcriber -->|"stdout (JSON lines)"| Supervisor
-
     Transcriber --> Whisper
     Whisper --> Shaders
     Whisper <--> UMA
-
-    Storage --> MD
-    Storage --> Media
+    Storage --> Storage_Tier
     Protocol --> Media
+
+    %% iOS Wiring
+    ContentView --> VM
+    WriteView --> VM
+    CalView --> VM
+    FeedView --> VM
+    WriteView --> DictationEngine
+    VM --> iOS_Storage
+    VM --> ImgProc
+    iOS_Storage --> Storage_Tier
 ```
 
 ### Component Responsibility Matrix
 
-| Component | Technology | Execution Context | Network / FS Access | Responsibilities |
-| :--- | :--- | :--- | :--- | :--- |
-| **Renderer** | HTML5, CSS3, Vanilla JS | Chromium Sandbox | None (`default-src 'none'`) | View rendering, SPA navigation, live UI state, microphone capture, image downsampling. |
-| **AudioWorklet** | Web Audio API Worklet | Audio Render Thread | None | Off-main-thread Float32 sample gathering, RMS loudness calculation. |
-| **Preload Bridge** | Electron `contextBridge` | Isolated Context | Controlled IPC only | Exposes typed `window.journal` API; enforces isolation barrier. |
-| **Main Process** | Node.js, Electron APIs | Host Process | Local FS, Child Process | Window lifecycle, native menus, child process supervision, custom scheme handler. |
-| **Storage Engine** | Node.js `fs.promises` | Main Process | Local FS (`~/Documents/Journal`) | Markdown parsing/serialization, directory hierarchy, media writes, path traversal checks. |
-| **Transcriber** | C++17, whisper.cpp, Metal | Child Subprocess (`fork/exec`) | `stdin` / `stdout` only | Streaming audio ingest, silence gap detection, GPU-accelerated Whisper inference. |
+| Platform | Component | Technology | Execution Context | Network / FS Access | Responsibilities |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| **macOS** | **Renderer** | HTML5, CSS3, Vanilla JS | Chromium Sandbox | None (`default-src 'none'`) | View rendering, SPA navigation, live UI state, microphone capture, image downsampling. |
+| **macOS** | **AudioWorklet** | Web Audio API Worklet | Audio Render Thread | None | Off-main-thread Float32 sample gathering, RMS loudness calculation. |
+| **macOS** | **Preload Bridge** | Electron `contextBridge` | Isolated Context | Controlled IPC only | Exposes typed `window.journal` API; enforces isolation barrier. |
+| **macOS** | **Main Process** | Node.js, Electron APIs | Host Process | Local FS, Child Process | Window lifecycle, native menus, child process supervision, custom scheme handler, `fs.watch` sync. |
+| **macOS** | **Storage Engine** | Node.js `fs.promises` | Main Process | Local FS (`~/Documents/Journal`) | Markdown parsing/serialization, directory hierarchy, media writes, path traversal checks. |
+| **macOS** | **Transcriber** | C++17, whisper.cpp, Metal | Child Subprocess (`fork/exec`) | `stdin` / `stdout` only | Streaming audio ingest, silence gap detection, GPU-accelerated Whisper inference. |
+| **iOS** | **SwiftUI Views** | SwiftUI | Main UI Thread | Memory only | Responsive layout, warm paper theme tokens, interactive calendar tiles, photo galleries, modal sheets. |
+| **iOS** | **ViewModel** | Swift `@MainActor` | UI Actor | Memory / Storage Bridge | State management, active date/tag filters, photo selection, CRUD operations, reactive updates. |
+| **iOS** | **Storage Engine** | Swift `FileManager` | Background Task | Security-Scoped Directory | Folder bookmark resolution, file coordination, markdown frontmatter serialization. |
+| **iOS** | **Dictation Engine** | `AVAudioEngine`, `Speech` | Neural Engine & MainActor | Microphone Hardware | 100% on-device speech-to-text, audio buffer relay, pause survival, instant synchronous teardown on save. |
+| **iOS** | **Image Processor** | `UIGraphicsImageRenderer` | CPU / GPU CoreGraphics | Memory buffers | 1:1 center-crop, dual-tier JPEG compression (full-res 1800x1800 at 0.88, thumb 320x320 at 0.82). |
 
 ---
 
@@ -104,13 +138,13 @@ flowchart LR
 1. **Zero-Copy Tensor Evaluation**:
    `transcriber` allocates context buffers in system memory. Because Metal maps this unified address space directly, tensor kernels access weights and activations without memory copies.
 2. **Embedded Metal Shaders**:
-   Configured in `native/CMakeLists.txt`:
+   Configured in `mac/native/CMakeLists.txt`:
    ```cmake
    set(GGML_METAL_EMBED_LIBRARY ON CACHE BOOL "" FORCE)
    ```
    During compilation, Apple's `metal` compiler translates `ggml-metal.metal` into `.air` intermediate representation, links it into a `.metallib`, and embeds it as a C byte array inside the Mach-O binary. At runtime, the application initializes the GPU pipeline with zero filesystem dependencies.
 3. **GPU Context Activation**:
-   In `native/transcriber.cpp`:
+   In `mac/native/transcriber.cpp`:
    ```cpp
    whisper_context_params cparams = whisper_context_default_params();
    cparams.use_gpu = true; // Initializes MTLDevice and loads compute pipeline
@@ -223,6 +257,67 @@ stateDiagram-v2
 - **RMS Energy Calculation**:
   $$\text{RMS} = \sqrt{\frac{1}{N} \sum_{i=1}^{N} x_i^2} \quad \text{computed in 100ms sliding sub-windows}$$
 - **Result**: Cuts happen during natural pauses between words rather than across phonemes, preventing hallucination or dropped syllables.
+
+### 2.3 iOS On-Device Neural Dictation Architecture
+
+The companion iOS app uses Apple's native `Speech` framework configured for 100% on-device neural transcription without external server queries (`requiresOnDeviceRecognition = true`).
+
+```mermaid
+flowchart TD
+    subgraph Audio_Hardware["iOS Audio Hardware"]
+        Mic["Microphone Input Node (AVAudioEngine)"]
+        Tap["Bus 0 Audio Tap (Float32 PCM)"]
+    end
+
+    subgraph Relay_Layer["Thread-Safe Stream Relay (AudioBufferRelay)"]
+        Relay["Relay Bridge (Lock-Guarded)"]
+    end
+
+    subgraph Recognition_Layer["Apple Neural Engine (ANE)"]
+        Req["SFSpeechAudioBufferRecognitionRequest"]
+        Task["SFSpeechRecognitionTask"]
+        Hypothesis["Transcription Result (bestTranscription)"]
+    end
+
+    subgraph Continuity_Engine["Utterance Continuity Engine (DictationEngine.swift)"]
+        TimestampCheck{"Segment Timestamp or Word Reset?"}
+        CommitHypo["Commit to committedText"]
+        SmartJoin["combineText (Capitalization & Spacing)"]
+        PublishedText["currentText (@Published on MainActor)"]
+    end
+
+    Mic --> Tap
+    Tap --> Relay
+    Relay --> Req
+    Req --> Task
+    Task --> Hypothesis
+    Hypothesis --> TimestampCheck
+    TimestampCheck -->|New Utterance after Pause| CommitHypo
+    TimestampCheck -->|Growing Utterance| SmartJoin
+    CommitHypo --> SmartJoin
+    SmartJoin --> PublishedText
+
+    Task -.->|Timeout on Silence| AutoRestart["Seamlessly Recreate Request & Task on Live Relay"]
+    AutoRestart -.-> Relay
+```
+
+1. **Continuous Stream Relay (`AudioBufferRelay`)**:
+   `AVAudioEngine.inputNode` installs a tap once. Instead of tearing down the audio session when a recognition task completes or times out, `AudioBufferRelay` pipes audio buffers to whichever `SFSpeechAudioBufferRecognitionRequest` is currently active.
+2. **Utterance Continuity Across Pauses**:
+   When a user pauses mid-thought, Apple's speech recognizer flushes its partial transcription buffer and restarts recognition with a new utterance. `DictationEngine.swift` implements `shouldCommitPreviousHypothesis(newHypothesis:result:)`:
+   - Inspects `result.bestTranscription.segments.first?.timestamp` relative to the previous hypothesis end time.
+   - Detects when the first word changes after a silence gap.
+   - Commits the previous phrase into `committedText` rather than allowing it to be overwritten.
+3. **Smart Sentence Joining (`combineText`)**:
+   - Preserves explicit newlines.
+   - Adds single spaces between independent utterances.
+   - Automatically capitalizes the first letter of subsequent utterances if preceding sentences end with `.`, `?`, or `!`.
+4. **Instant Synchronous Teardown (`stopImmediately()`)**:
+   When the user clicks "Save entry" while speaking:
+   - Synchronously invalidates the timer and ends audio relay in **0ms**.
+   - Commits in-flight hypothesis and updates `currentText`.
+   - Halts `AVAudioEngine`, drops the audio tap, cancels the recognition task, and deactivates `AVAudioSession` (turning off the iOS microphone indicator immediately).
+   - Returns the captured transcript immediately so `saveEntry()` persists it in the same runloop turn.
 
 ---
 
@@ -354,11 +449,85 @@ flowchart TD
 - **Storage Efficiency**: Uncompressed 12MP smartphone photos (~5-10MB each) are compressed to ~300KB for full resolution and ~25KB for thumbnails. A year of daily photos fits inside ~120MB.
 - **Fast Calendar Loading**: The calendar view loads exclusively `.thumb.jpg` assets, eliminating memory pressure and frame drops during fast scrolling.
 
+### iOS Image Processing Parity (`ImageProcessor.swift`)
+
+On iOS, images picked via `PhotosPicker` or pasted into the composer undergo identical transformations in `ImageProcessor.process(rawImageData:)`:
+1. Uses `UIGraphicsImageRenderer` with format `.scale = 1.0` to perform a centered 1:1 square crop:
+   $$\text{side} = \min(\text{width}, \text{height}), \quad x = \frac{\text{width} - \text{side}}{2}, \quad y = \frac{\text{height} - \text{side}}{2}$$
+2. Compresses full photo down to max 1800×1800 px with `jpegData(compressionQuality: 0.88)`.
+3. Compresses thumbnail down to max 320×320 px with `jpegData(compressionQuality: 0.82)`.
+4. Saves to the identical `media/YYYY/MM/<uuid>.jpg` and `media/YYYY/MM/<uuid>.thumb.jpg` structure.
+
+### Free Cross-Device iCloud Drive Synchronization
+
+Journal achieves automatic, real-time cross-device sync between macOS and iOS with **zero server infrastructure** and **no paid Apple Developer Program fees**:
+
+```mermaid
+sequenceDiagram
+    participant iOS as iPhone (Journal App)
+    participant iCloud as iCloud Drive (Journal Folder)
+    participant MacFS as macOS Filesystem (~/Library/Mobile Documents/...)
+    participant Watcher as fs.watch (main.js)
+    participant Renderer as Desktop UI (app.js)
+
+    Note over iOS,iCloud: User writes or dictates an entry on iPhone
+    iOS->>iCloud: Writes entries/2026/09/2026-09-11-230000.md
+    iCloud->>MacFS: macOS CloudKit daemon pulls new file to local disk
+    MacFS->>Watcher: File creation event detected
+    Watcher->>Renderer: IPC Event 'journal:changed'
+    Renderer->>Renderer: loadEntries() -> render()
+    Note over Renderer: Calendar tile updates and entry appears in feed!
+```
+
+1. **Security-Scoped Bookmarks on iOS**:
+   Instead of requiring proprietary iCloud container entitlements (`com.apple.developer.ubiquity-container-identifiers`), `JournalStorage.swift` stores a security-scoped bookmark (`URL.bookmarkData(options: .minimalBookmark)`) when the user selects their `Journal` folder in iCloud Drive. The app maintains permanent, sandboxed read/write permissions across launches.
+2. **Recursive File Watcher on macOS**:
+   `mac/src/main.js` monitors the `entries/` directory using Node's `fs.watch(..., { recursive: true })`. When iCloud delivers a new or edited file, the main process fires the `journal:changed` IPC event over the preload bridge.
+3. **Live Sync Channel**:
+   `mac/src/renderer/app.js` listens via `window.journal.onChanged(async () => { await loadEntries(); })`, seamlessly re-rendering the calendar and feed without requiring an application restart.
+4. **Foreground Re-Sync on iOS**:
+   `ContentView.swift` monitors SwiftUI's `scenePhase`. Whenever the app transitions to `.active`, it reloads entries from disk to ingest any changes made on the desktop.
+
+### Desktop Calendar Filtering & Reactive Event Loop
+
+The desktop calendar view allows users to click on any date tile to immediately filter the chronological feed to that specific date:
+
+1. **Day Key Normalization (`dayKeyOf`)**:
+   Entries created across different clients are normalized via regex:
+   ```javascript
+   function dayKeyOf(entry) {
+     if (entry.id && /^\d{4}-\d{2}-\d{2}/.test(entry.id)) return entry.id.slice(0, 10);
+     if (entry.date && /^\d{4}-\d{2}-\d{2}/.test(entry.date)) return entry.date.slice(0, 10);
+     return (entry.id || entry.date || '').slice(0, 10);
+   }
+   ```
+2. **Reactive View Transition**:
+   When clicking a day cell with entries:
+   ```javascript
+   cell.addEventListener('click', () => {
+     if (dayEntries.length) {
+       state.dayFilter = key;
+       state.search = '';
+       state.activeTags.clear();
+       $('#search').value = '';
+       switchView('entries');
+       render(); // Re-evaluates visibleEntries() and renders date chip in #filters
+     } else {
+       clearComposer();
+       $('#date').value = key;
+       switchView('write');
+       $('#body').focus();
+     }
+   });
+   ```
+3. **Filter Reset**:
+   Clicking the **Entries** button in the top navigation bar or pressing `⌘ 3` detects `state.dayFilter`, clears it to `null`, and calls `render()` to restore the full unconstrained feed.
+
 ---
 
 ## 5. Developer Runbook & Model Customization
 
-### Model Modification Workflow
+### macOS Model Modification Workflow
 
 ```mermaid
 flowchart TD
@@ -369,30 +538,32 @@ flowchart TD
     SelectModel -->|High Precision English| Medium["medium.en (~1.5GB)"]
     SelectModel -->|Multilingual SOTA| Turbo["large-v3-turbo-q5_0 (~550MB)"]
 
-    Tiny --> EditConfig["Update WHISPER_MODEL in make.command"]
+    Tiny --> EditConfig["Update WHISPER_MODEL in mac/make.command"]
     Small --> EditConfig
     Medium --> EditConfig
     Turbo --> EditConfig
 
-    EditConfig --> Download["Run ./make.command engine"]
-    Download --> Verify["Run ./make.command dictation"]
-    Verify --> Done["Test in UI via npm start"]
+    EditConfig --> Download["Run ./mac/make.command engine"]
+    Download --> Verify["Run ./mac/make.command dictation"]
+    Verify --> Done["Test in UI via cd mac && npm start"]
 ```
 
 #### Step 1: Update Build Configuration
-Open `make.command` and modify line 19:
+Open `mac/make.command` and modify line 19:
 ```bash
 WHISPER_MODEL="base.en"  # Or small.en-q5_1, tiny.en, large-v3-turbo-q5_0
 ```
 
 #### Step 2: Download Weights & Recompile Helper
 ```bash
+cd mac
 ./make.command engine
 ```
-This triggers `native/whisper.cpp/models/download-ggml-model.sh`, downloads the quantized weights into `native/models/`, and recompiles `native/build/transcriber` with embedded Metal shaders.
+This triggers `mac/native/whisper.cpp/models/download-ggml-model.sh`, downloads the quantized weights into `mac/native/models/`, and recompiles `mac/native/build/transcriber` with embedded Metal shaders.
 
 #### Step 3: Verify Inference Correctness
 ```bash
+cd mac
 ./make.command dictation
 ```
 Streams `jfk.wav` through the native transcriber and verifies that transcript tokens match expected output.
@@ -403,16 +574,16 @@ Developers can test different configurations or external model weights dynamical
 
 ```bash
 # Point to an external GGML model weight file:
-JOURNAL_MODEL=/Volumes/Models/ggml-large-v3-turbo.bin npm start
+JOURNAL_MODEL=/Volumes/Models/ggml-large-v3-turbo.bin npm --prefix mac start
 
 # Point to an experimental C++ helper or debugging stub:
-JOURNAL_TRANSCRIBER=/path/to/custom/transcriber npm start
+JOURNAL_TRANSCRIBER=/path/to/custom/transcriber npm --prefix mac start
 
 # Override journal storage root to an isolated sandbox:
-JOURNAL_ROOT=/tmp/test-journal npm start
+JOURNAL_ROOT=/tmp/test-journal npm --prefix mac start
 ```
 
-### Parameter Tuning Reference (`native/transcriber.cpp`)
+### Parameter Tuning Reference (`mac/native/transcriber.cpp`)
 
 | Parameter | Default | Trade-off When Decreased | Trade-off When Increased |
 | :--- | :--- | :--- | :--- |
@@ -421,6 +592,42 @@ JOURNAL_ROOT=/tmp/test-journal npm start
 | `TAIL_SEARCH` | `4.0f` | Narrower window to find silence; higher risk of cutting mid-word. | Slower gap detection; searches further back into spoken audio. |
 | `threadCount()` | `4 to 8` | Slower token processing on CPU; less CPU core contention. | Faster CPU preprocessing; potential thread contention with Metal queue. |
 
+### iOS Developer Runbook & Verification
+
+#### Building & Compiling the iOS Target
+```bash
+DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer xcodebuild \
+  -project ios/Journal.xcodeproj \
+  -scheme Journal \
+  -destination "generic/platform=iOS" \
+  build
+```
+
+#### Executing Automated Verification Suites
+The project includes standalone verification test suites under `ios/Tests/` validating data reciprocity and speech engine continuity:
+
+```bash
+# 1. Verify DictationEngine pause survival, utterance continuity & instant teardown:
+DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer xcrun swiftc \
+  -parse-as-library \
+  ios/Tests/VerifyDictationEngine.swift \
+  ios/Journal/Audio/DictationEngine.swift \
+  -o .cache/verify_dictation && .cache/verify_dictation
+
+# 2. Verify Entry Markdown frontmatter serialization reciprocity:
+DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer xcrun swiftc \
+  ios/Tests/VerifyEntry.swift \
+  ios/Journal/Models/Entry.swift \
+  -o .cache/verify_entry && .cache/verify_entry
+
+# 3. Verify JournalStorage security-scoped bookmark filesystem operations:
+DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer xcrun swiftc \
+  ios/Tests/VerifyStorage.swift \
+  ios/Journal/Models/Entry.swift \
+  ios/Journal/Models/JournalStorage.swift \
+  -o .cache/verify_storage && .cache/verify_storage
+```
+
 ---
 
 ## 6. Failure Modes & System Resilience
@@ -428,8 +635,12 @@ JOURNAL_ROOT=/tmp/test-journal npm start
 | Failure Scenario | Root Cause | System Defense / Recovery Mechanism |
 | :--- | :--- | :--- |
 | **Model Load Timeout** | Corrupt weights file or slow disk I/O | Main process maintains a 60s timeout timer (`readyTimer`). If unready, kills child process with `SIGTERM` and displays actionable diagnostic alert. |
-| **Microphone Permission Denied** | macOS TCC privacy restriction | `main.js:ensureMicrophone()` checks `systemPreferences.getMediaAccessStatus('microphone')`. If denied, catches gracefully and prompts user with direct path to System Settings. |
+| **Microphone Permission Denied** | macOS / iOS TCC privacy restriction | `main.js:ensureMicrophone()` checks `systemPreferences.getMediaAccessStatus('microphone')`. iOS `DictationEngine.requestAuthorization()` requests permission asynchronously. If denied, catches gracefully and prompts user with direct path to System Settings. |
 | **Audio Input Overflow** | Whisper inference pass takes longer than audio ingestion | Audio read loop runs on a detached `std::thread reader` pushing to a thread-safe mutex-guarded queue. Audio is never dropped from `stdin`. |
 | **Canvas Pixel Tainting** | Attempting to read pixels from `journal://` origin | Canvas crops and compresses raw image data *before* converting to `journal://` URLs. Storage returns paths; renderer never reads raw pixels from custom protocols. |
 | **Filesystem Disconnection** | External drive holding Journal unplugged | `main.js:resolveRoot()` detects missing directory on startup and safely falls back to local `~/Documents/Journal` without crashing. |
 | **Subprocess Crash** | Segmentation fault or out-of-memory in C++ helper | Main process listens to `child.on('close')`. Slices whatever text was accumulated so far and resolves final promise; user never loses spoken text. |
+| **Speech Pause Timeout (iOS)** | Apple Neural Engine closes utterance after silence (`kAFAssistantErrorDomain 1110/203`) | `DictationEngine` detects silence timeout, commits previous hypothesis into `committedText`, and immediately restarts recognition task on the still-running audio tap without session teardown. |
+| **Instant Save While Speaking (iOS)** | User clicks "Save entry" while dictation is actively recording | `WriteView.saveEntry()` calls `stopImmediately()`, which synchronously captures in-flight words, halts `AVAudioEngine`, deactivates `AVAudioSession`, and writes the entry to disk in **0ms**. |
+| **iCloud Bookmark Stale (iOS)** | User changes iCloud account or deletes remote folder | `JournalStorage` catches security-scoped bookmark resolution failures and gracefully falls back to the app's local sandbox `Documents` directory without data loss. |
+

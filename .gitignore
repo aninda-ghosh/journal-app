@@ -1,15 +1,26 @@
 # Build tooling and output
 node_modules/
 dist/
+mac/node_modules/
+mac/dist/
 
 # whisper.cpp is a submodule, so it is part of the repository. What gets built
 # from it is not — and neither is the ~180MB speech model, which make.command
 # downloads on the first build. Git keeps every version of a binary forever.
-native/build/
-native/models/
+**/native/build/
+**/native/models/
 
 # Editor and tooling caches
-native/.cache/
+**/native/.cache/
+.cache/
+compile_commands.json
+.vscode/
+.idea/
+
+# iOS build artifacts
+**/DerivedData/
+*.xcodeproj/**/xcuserdata/
+*.xcworkspace/**/xcuserdata/
 .cache/
 compile_commands.json
 .vscode/

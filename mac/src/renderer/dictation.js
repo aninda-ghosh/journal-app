@@ -68,14 +68,29 @@ const Dictation = (() => {
     pendingLength = 0;
     total = 0;
 
-    stream = await navigator.mediaDevices.getUserMedia({
-      audio: {
-        channelCount: 1,
-        echoCancellation: true,
-        noiseSuppression: true,
-        autoGainControl: true
+    let audioConstraints = {
+      channelCount: 1,
+      echoCancellation: true,
+      noiseSuppression: true,
+      autoGainControl: true
+    };
+
+    // If AirPods or a Bluetooth microphone is connected to macOS, prioritize it over the built-in mic
+    try {
+      if (navigator.mediaDevices && navigator.mediaDevices.enumerateDevices) {
+        const devices = await navigator.mediaDevices.enumerateDevices();
+        const btMic = devices.find(
+          (d) => d.kind === 'audioinput' && /airpod|bluetooth|headset|wireless/i.test(d.label)
+        );
+        if (btMic && btMic.deviceId) {
+          audioConstraints.deviceId = { ideal: btMic.deviceId };
+        }
       }
-    });
+    } catch {
+      // Fallback cleanly to default input device
+    }
+
+    stream = await navigator.mediaDevices.getUserMedia({ audio: audioConstraints });
 
     context = new AudioContext({ sampleRate: SAMPLE_RATE });
     await context.audioWorklet.addModule('pcm-worklet.js');
