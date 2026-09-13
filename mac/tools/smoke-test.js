@@ -190,13 +190,11 @@ function connect(url) {
 
     // --- photo round trip -------------------------------------------------
     const media = await page.eval(
-      `window.journal.saveMedia({name:'test.png', photo:'${TINY_PNG}', thumb:'${TINY_PNG}', processed:true})`
+      `window.journal.saveMedia({name:'test.png', photo:'${TINY_PNG}', processed:true})`
     );
     check('photo saves to disk', Boolean(media?.path), media?.path);
-    check('original file written',
+    check('thumbnail file written',
       fs.existsSync(path.join(ROOT, media.path)), media.path);
-    check('thumbnail written',
-      fs.existsSync(path.join(ROOT, media.thumb)), media.thumb);
 
     // --- the journal:// protocol actually serves the image -----------------
     const loaded = await page.eval(`new Promise((resolve) => {

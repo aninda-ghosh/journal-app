@@ -14,6 +14,34 @@ public class JournalViewModel: ObservableObject {
     @Published public var isSaving: Bool = false
     @Published public var errorMessage: String? = nil
 
+    // Calendar state persistence across tab switches
+    @Published public var calendarDisplayedDate: Date = Date()
+    @Published public var calendarSelectedDayKey: String? = nil
+    @Published public var calendarExpandedEntryIds: Set<String> = []
+
+    // Draft entry state persistence across tab switches
+    public struct DraftEntry: Codable, Equatable {
+        public var title: String = ""
+        public var body: String = ""
+        public var date: Date = Date()
+        public var tags: [String] = []
+        public var photoPaths: [String] = []
+
+        public init(title: String = "", body: String = "", date: Date = Date(), tags: [String] = [], photoPaths: [String] = []) {
+            self.title = title
+            self.body = body
+            self.date = date
+            self.tags = tags
+            self.photoPaths = photoPaths
+        }
+
+        public var isEmpty: Bool {
+            title.isEmpty && body.isEmpty && tags.isEmpty && photoPaths.isEmpty
+        }
+    }
+
+    @Published public var draft: DraftEntry = DraftEntry()
+
     public enum Tab: String, CaseIterable, Identifiable {
         case write = "Write"
         case calendar = "Calendar"
@@ -160,10 +188,10 @@ public class JournalViewModel: ObservableObject {
         }
     }
 
-    /// Preprocesses, center-crops, and saves media data (full + thumbnail) into the storage directory.
+    /// Preprocesses, center-crops, and saves media data (optimized thumbnail) into the storage directory.
     public func saveMedia(data: Data, date: Date) throws -> String {
         let processed = try ImageProcessor.process(rawImageData: data)
-        let (relPath, _) = try storage.saveMedia(photoData: processed.photoData, thumbData: processed.thumbData)
+        let (relPath, _) = try storage.saveMedia(photoData: processed.photoData)
         return relPath
     }
 
@@ -173,8 +201,14 @@ public class JournalViewModel: ObservableObject {
     }
 
     /// Resolves thumbnail URL for a given photo path.
+    /// If an older entry has a separate `.thumb.jpg` on disk, it returns that.
+    /// Otherwise, it falls back to the saved single `.jpg` photo.
     public func resolveThumbURL(photoRelPath: String) -> URL? {
         let thumbRel = photoRelPath.replacingOccurrences(of: #"\.[^./]+$"#, with: ".thumb.jpg", options: .regularExpression)
-        return storage.resolveMedia(relPath: thumbRel) ?? storage.resolveMedia(relPath: photoRelPath)
+        if let thumbURL = storage.resolveMedia(relPath: thumbRel),
+           FileManager.default.fileExists(atPath: thumbURL.path) {
+            return thumbURL
+        }
+        return storage.resolveMedia(relPath: photoRelPath)
     }
 }

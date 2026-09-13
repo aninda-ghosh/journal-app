@@ -339,7 +339,8 @@ public class JournalStorage {
 
     // MARK: - Media Storage
 
-    /// Saves full photo and thumbnail JPEGs into `media/YYYY/MM/<id>.jpg`.
+    /// Saves optimized thumbnail JPEG into `media/YYYY/MM/<id>.jpg`.
+    /// Only the single optimized thumbnail is stored, saving disk space and iCloud sync bandwidth.
     public func saveMedia(
         photoData: Data,
         thumbData: Data? = nil,
@@ -369,16 +370,7 @@ public class JournalStorage {
         try photoData.write(to: photoURL, options: .atomic)
 
         let relPhotoPath = "media/\(year)/\(month)/\(photoFilename)"
-        var relThumbPath: String? = nil
-
-        if let thumb = thumbData, !thumb.isEmpty {
-            let thumbFilename = "\(uuid).thumb.jpg"
-            let thumbURL = targetDir.appendingPathComponent(thumbFilename, isDirectory: false)
-            try thumb.write(to: thumbURL, options: .atomic)
-            relThumbPath = "media/\(year)/\(month)/\(thumbFilename)"
-        }
-
-        return (path: relPhotoPath, thumbPath: relThumbPath)
+        return (path: relPhotoPath, thumbPath: nil)
     }
 
     /// Resolves a relative `media/...` path to an absolute URL, guaranteeing that

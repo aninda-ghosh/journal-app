@@ -49,25 +49,20 @@ struct VerifyImageProcessor {
             let landscapeImage = createTestImage(width: 4000, height: 3000)
             let processedLandscape = try ImageProcessor.process(cgImage: landscapeImage)
 
-            assertEqual(processedLandscape.dimension, 1800, "Large photo must scale to photoMaxDimension (1800)")
-            assertEqual(processedLandscape.thumbDimension, 320, "Thumbnail must scale to thumbMaxDimension (320)")
+            assertEqual(processedLandscape.dimension, 512, "Large photo must scale to photoMaxDimension (512)")
+            assertEqual(processedLandscape.thumbDimension, 512, "Thumbnail dimension matches 512")
             assertEqual(processedLandscape.photoData.isEmpty, false, "Photo JPEG data must not be empty")
-            assertEqual(processedLandscape.thumbData.isEmpty, false, "Thumbnail JPEG data must not be empty")
 
             // Verify JPEG magic bytes (FF D8 FF)
             let photoHeader = [UInt8](processedLandscape.photoData.prefix(3))
             assertEqual(photoHeader, [0xFF, 0xD8, 0xFF], "Photo output must be valid JPEG binary format")
 
-            let thumbHeader = [UInt8](processedLandscape.thumbData.prefix(3))
-            assertEqual(thumbHeader, [0xFF, 0xD8, 0xFF], "Thumbnail output must be valid JPEG binary format")
-
-            // Test 2: Portrait image smaller than 1800 (1200 x 1600)
-            // Shortest edge is 1200. Since 1200 < 1800, photo dimension should be exactly 1200 (no upscaling).
-            let portraitImage = createTestImage(width: 1200, height: 1600)
+            // Test 2: Portrait image smaller than 512 (400 x 600)
+            // Shortest edge is 400. Since 400 < 512, photo dimension should be exactly 400 (no upscaling).
+            let portraitImage = createTestImage(width: 400, height: 600)
             let processedPortrait = try ImageProcessor.process(cgImage: portraitImage)
 
-            assertEqual(processedPortrait.dimension, 1200, "Image smaller than 1800 should retain shortest dimension (1200)")
-            assertEqual(processedPortrait.thumbDimension, 320, "Thumbnail must still scale to 320")
+            assertEqual(processedPortrait.dimension, 400, "Image smaller than 512 should retain shortest dimension (400)")
 
             // Test 3: End-to-end integration with JournalStorage
             let tempDir = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
@@ -77,18 +72,14 @@ struct VerifyImageProcessor {
             let storage = JournalStorage(customRootURL: tempDir)
             let media = try storage.saveMedia(
                 photoData: processedLandscape.photoData,
-                thumbData: processedLandscape.thumbData,
                 customUUID: "e2e-photo-test"
             )
 
             assertEqual(media.path.hasSuffix("e2e-photo-test.jpg"), true, "Photo saved with expected filename")
-            assertEqual(media.thumbPath?.hasSuffix("e2e-photo-test.thumb.jpg"), true, "Thumbnail saved with expected filename")
+            assertEqual(media.thumbPath == nil, true, "Separate thumbnail is omitted")
 
             let resolvedPhoto = storage.resolveMedia(relPath: media.path)
             assertEqual(FileManager.default.fileExists(atPath: resolvedPhoto!.path), true, "Saved photo must exist on disk")
-
-            let resolvedThumb = storage.resolveMedia(relPath: media.thumbPath!)
-            assertEqual(FileManager.default.fileExists(atPath: resolvedThumb!.path), true, "Saved thumbnail must exist on disk")
 
             // Cleanup
             try? FileManager.default.removeItem(at: tempDir)

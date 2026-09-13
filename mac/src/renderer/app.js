@@ -244,7 +244,7 @@ function fileToDataUrl(file) {
    frame are gone once written, so this is the one place the app destroys
    something it can't get back. */
 
-const PHOTO_MAX = 2048;   // stored photo, square
+const PHOTO_MAX = 512;    // stored photo thumbnail, square
 const THUMB_MAX = 512;    // browsing copy, square
 
 /** Centre-crop to a square and scale down. Never scales up. */
@@ -269,6 +269,7 @@ function squareCanvas(img, max) {
 
 /**
  * Turn a chosen file into what actually gets stored.
+ * Generates a single lightweight 512px square thumbnail @ 82% quality.
  * Returns null if the browser can't decode it — some cameras and phones write
  * formats Chromium won't open, and losing the photo would be far worse than
  * storing it at full size.
@@ -279,8 +280,8 @@ async function prepareImage(file) {
     const img = await loadImage(url);
     if (!img.naturalWidth || !img.naturalHeight) return null;
     return {
-      photo: squareCanvas(img, PHOTO_MAX).toDataURL('image/jpeg', 0.88),
-      thumb: squareCanvas(img, THUMB_MAX).toDataURL('image/jpeg', 0.82),
+      photo: squareCanvas(img, PHOTO_MAX).toDataURL('image/jpeg', 0.82),
+      thumb: null,
       size: Math.min(PHOTO_MAX, Math.min(img.naturalWidth, img.naturalHeight))
     };
   } catch {
@@ -302,7 +303,7 @@ async function addPhotos(files) {
       const ready = await prepareImage(file);
       const stored = ready
         ? await window.journal.saveMedia({
-            name: file.name, photo: ready.photo, thumb: ready.thumb, processed: true
+            name: file.name, photo: ready.photo, thumb: null, processed: true
           })
         : await window.journal.saveMedia({
             name: file.name, photo: await fileToDataUrl(file), thumb: null, processed: false
@@ -311,7 +312,7 @@ async function addPhotos(files) {
       if (!ready) toast(`Couldn't resize ${file.name} — kept it as it came.`);
 
       slot.path = stored.path;
-      slot.thumb = stored.thumb;
+      slot.thumb = stored.thumb || stored.path;
       slot.pending = false;
     } catch (err) {
       toast('Could not add ' + file.name);

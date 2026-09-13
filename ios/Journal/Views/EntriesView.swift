@@ -24,7 +24,7 @@ public struct EntriesView: View {
     }
 
     public var body: some View {
-        ScrollView(showsIndicators: false) {
+        ScrollView(.vertical, showsIndicators: false) {
             VStack(spacing: 16) {
                 // Search Pill Input matching Screenshot 2
                 HStack(spacing: 8) {
@@ -129,6 +129,8 @@ public struct EntriesView: View {
                         }
                         .padding(.horizontal, 18)
                     }
+                    .scrollBounceBehavior(.basedOnSize, axes: .vertical)
+                    .clipped()
                 }
 
                 // Feed Cards
@@ -196,8 +198,12 @@ public struct EntriesView: View {
                 .padding(.horizontal, 18)
                 .padding(.bottom, 24)
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .background(JournalTheme.bg)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .scrollBounceBehavior(.basedOnSize, axes: .horizontal)
+        .clipped()
+        .background(JournalTheme.bg.ignoresSafeArea())
         .refreshable {
             viewModel.loadEntries()
         }
@@ -281,6 +287,7 @@ struct EntryCard: View {
                     .font(JournalTheme.serifProse(16.5))
                     .foregroundColor(JournalTheme.text)
                     .lineSpacing(5)
+                    .frame(maxWidth: .infinity, alignment: .leading)
             }
 
             // Tags Strip
@@ -299,6 +306,7 @@ struct EntryCard: View {
                 .padding(.top, 2)
             }
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
         .padding(20)
         .journalCard()
     }

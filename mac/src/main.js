@@ -120,8 +120,17 @@ function registerProtocol() {
     // together to recover the stored relative path.
     const url = new URL(request.url);
     const rel = decodeURIComponent(url.host + url.pathname).replace(/^\/+/, '');
-    const file = journal.resolveMedia(rel);
+    let file = journal.resolveMedia(rel);
     if (!file) return new Response('Not found', { status: 404 });
+    // If a thumbnail is requested (e.g. .thumb.jpg) but does not exist on disk,
+    // fallback to the base image (e.g. .jpg) since new entries only save the single thumbnail file.
+    if (!fs.existsSync(file) && /\.thumb\.[^./]+$/.test(rel)) {
+      const fallbackRel = rel.replace(/\.thumb\./, '.');
+      const fallbackFile = journal.resolveMedia(fallbackRel);
+      if (fallbackFile && fs.existsSync(fallbackFile)) {
+        file = fallbackFile;
+      }
+    }
     return net.fetch(pathToFileURL(file).toString());
   });
 }

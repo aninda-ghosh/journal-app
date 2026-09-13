@@ -14,12 +14,14 @@ import SwiftUI
 /// - Quiet filesystem footer with interactive `Move...` link
 public struct CalendarView: View {
     @EnvironmentObject var viewModel: JournalViewModel
-    @State private var displayedDate: Date = Date()
-    @State private var selectedDayKey: String? = nil
-    @State private var expandedEntryIds: Set<String> = []
-    @State private var editingEntry: Entry? = nil
-    @State private var entryToDelete: Entry? = nil
-    @State private var showDeleteConfirmation: Bool = false
+    private var displayedDate: Date {
+        get { viewModel.calendarDisplayedDate }
+        nonmutating set { viewModel.calendarDisplayedDate = newValue }
+    }
+    private var selectedDayKey: String? {
+        get { viewModel.calendarSelectedDayKey }
+        nonmutating set { viewModel.calendarSelectedDayKey = newValue }
+    }
 
     public var onOpenSettings: (() -> Void)? = nil
 
@@ -31,7 +33,7 @@ public struct CalendarView: View {
     }
 
     public var body: some View {
-        ScrollView(showsIndicators: false) {
+        ScrollView(.vertical, showsIndicators: false) {
             VStack(alignment: .leading, spacing: 16) {
                 // Month Header
                 CalendarHeaderView(
@@ -51,8 +53,8 @@ public struct CalendarView: View {
 
                 // 7-column Calendar Day Tiles Grid
                 LazyVGrid(columns: columns, spacing: 7) {
-                    ForEach(daysInMonth(), id: \.self) { date in
-                        if let date = date {
+                    ForEach(daysInMonth()) { day in
+                        if let date = day.date {
                             let key = dayKey(from: date)
                             let dayEntries = viewModel.entriesByDay[key] ?? []
                             CalendarDayCell(
@@ -87,17 +89,9 @@ public struct CalendarView: View {
                     CalendarDayPreviewCard(
                         dayKey: key,
                         entries: dayEntries,
-                        expandedEntryIds: $expandedEntryIds,
-                        onEdit: { editingEntry = $0 },
-                        onDelete: {
-                            entryToDelete = $0
-                            showDeleteConfirmation = true
-                        },
-                        onViewInFeed: {
+                        onSelectEntry: { _ in
                             viewModel.dayFilter = key
-                            withAnimation(.easeInOut(duration: 0.15)) {
-                                viewModel.selectedTab = .entries
-                            }
+                            viewModel.selectedTab = .entries
                         }
                     )
                 }
@@ -131,26 +125,12 @@ public struct CalendarView: View {
                 .padding(.horizontal, 18)
                 .padding(.bottom, 24)
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .background(JournalTheme.bg)
-        .sheet(item: $editingEntry) { entry in
-            WriteView(editingEntry: entry)
-                .environmentObject(viewModel)
-        }
-        .confirmationDialog(
-            "Delete Entry?",
-            isPresented: $showDeleteConfirmation,
-            titleVisibility: .visible,
-            presenting: entryToDelete
-        ) { entry in
-            Button("Delete Entry", role: .destructive) {
-                viewModel.deleteEntry(id: entry.id)
-                expandedEntryIds.remove(entry.id)
-            }
-            Button("Cancel", role: .cancel) {}
-        } message: { _ in
-            Text("The writing is removed. Photos are kept in your media folder.")
-        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .scrollBounceBehavior(.basedOnSize, axes: .horizontal)
+        .clipped()
+        .background(JournalTheme.bg.ignoresSafeArea())
     }
 
     // MARK: - Actions & Helpers
@@ -159,12 +139,10 @@ public struct CalendarView: View {
         withAnimation(.easeInOut(duration: 0.15)) {
             if selectedDayKey == key {
                 selectedDayKey = nil
-                expandedEntryIds.removeAll()
             } else if !dayEntries.isEmpty {
                 selectedDayKey = key
-                if let first = dayEntries.first {
-                    expandedEntryIds = [first.id]
-                }
+            } else {
+                selectedDayKey = nil
             }
         }
     }
@@ -185,7 +163,6 @@ public struct CalendarView: View {
         if let newDate = calendar.date(byAdding: .month, value: -1, to: displayedDate) {
             displayedDate = newDate
             selectedDayKey = nil
-            expandedEntryIds.removeAll()
         }
     }
 
@@ -193,21 +170,30 @@ public struct CalendarView: View {
         if let newDate = calendar.date(byAdding: .month, value: 1, to: displayedDate) {
             displayedDate = newDate
             selectedDayKey = nil
-            expandedEntryIds.removeAll()
         }
     }
 
-    private func daysInMonth() -> [Date?] {
+    struct CalendarGridDay: Identifiable {
+        let id: String
+        let date: Date?
+    }
+
+    private func daysInMonth() -> [CalendarGridDay] {
         guard let monthInterval = calendar.dateInterval(of: .month, for: displayedDate) else { return [] }
         let firstDay = monthInterval.start
         let firstWeekday = calendar.component(.weekday, from: firstDay)
         let leadingPadding = firstWeekday - 1
 
-        var days: [Date?] = Array(repeating: nil, count: leadingPadding)
+        var days: [CalendarGridDay] = []
+        for i in 0..<leadingPadding {
+            days.append(CalendarGridDay(id: "pad-\(i)", date: nil))
+        }
+
         let numberOfDays = calendar.range(of: .day, in: .month, for: displayedDate)?.count ?? 30
         for dayOffset in 0..<numberOfDays {
             if let date = calendar.date(byAdding: .day, value: dayOffset, to: firstDay) {
-                days.append(date)
+                let key = dayKey(from: date)
+                days.append(CalendarGridDay(id: "day-\(key)", date: date))
             }
         }
         return days
@@ -363,6 +349,11 @@ struct CalendarDayCell: View {
                 .padding(5)
             }
             .aspectRatio(1, contentMode: .fill)
+            .background(
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .fill(JournalTheme.bgRaised)
+                    .shadow(color: JournalTheme.shadowColor, radius: 1, x: 0, y: 1)
+            )
             .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
             .overlay(
                 RoundedRectangle(cornerRadius: 10, style: .continuous)
@@ -371,7 +362,6 @@ struct CalendarDayCell: View {
                         lineWidth: (isSelected || isToday) ? 1.5 : 1
                     )
             )
-            .shadow(color: JournalTheme.shadowColor, radius: 1, x: 0, y: 1)
         }
         .buttonStyle(.plain)
     }
@@ -380,14 +370,11 @@ struct CalendarDayCell: View {
 struct CalendarDayPreviewCard: View {
     let dayKey: String
     let entries: [Entry]
-    @Binding var expandedEntryIds: Set<String>
-    var onEdit: (Entry) -> Void
-    var onDelete: (Entry) -> Void
-    var onViewInFeed: () -> Void
+    var onSelectEntry: (Entry) -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            // Header
+            // Header: Day title on left, count pill on right
             HStack(alignment: .center) {
                 Text(formattedDayHeader(dayKey))
                     .font(JournalTheme.serifTitle(18, weight: .semibold))
@@ -395,7 +382,11 @@ struct CalendarDayPreviewCard: View {
 
                 Spacer()
 
-                Button(action: onViewInFeed) {
+                Button(action: {
+                    if let first = entries.first {
+                        onSelectEntry(first)
+                    }
+                }) {
                     HStack(spacing: 4) {
                         Text("\(entries.count) \(entries.count == 1 ? "entry" : "entries")")
                             .font(.system(size: 12, weight: .medium))
@@ -410,27 +401,12 @@ struct CalendarDayPreviewCard: View {
                 }
             }
 
-            // Entry Rows
+            // Entry Glimpse Rows
             ForEach(entries) { entry in
-                let isExpanded = expandedEntryIds.contains(entry.id)
-
-                CalendarEntryRow(
-                    entry: entry,
-                    dayKey: dayKey,
-                    isExpanded: isExpanded,
-                    onToggleExpand: {
-                        withAnimation(.easeInOut(duration: 0.22)) {
-                            if isExpanded {
-                                expandedEntryIds.remove(entry.id)
-                            } else {
-                                expandedEntryIds.insert(entry.id)
-                            }
-                        }
-                    },
-                    onEdit: { onEdit(entry) },
-                    onDelete: { onDelete(entry) },
-                    onViewInFeed: onViewInFeed
-                )
+                Button(action: { onSelectEntry(entry) }) {
+                    CalendarEntryGlimpseRow(entry: entry)
+                }
+                .buttonStyle(.plain)
 
                 if entry.id != entries.last?.id {
                     Divider()
@@ -442,7 +418,6 @@ struct CalendarDayPreviewCard: View {
         .padding(16)
         .journalCard()
         .padding(.horizontal, 18)
-        .transition(.opacity)
     }
 
     private func formattedDayHeader(_ dayKey: String) -> String {
@@ -455,149 +430,69 @@ struct CalendarDayPreviewCard: View {
     }
 }
 
-struct CalendarEntryRow: View {
+/// Concise short glimpse row for CalendarView preview
+struct CalendarEntryGlimpseRow: View {
+    @EnvironmentObject var viewModel: JournalViewModel
     let entry: Entry
-    let dayKey: String
-    let isExpanded: Bool
-    let onToggleExpand: () -> Void
-    let onEdit: () -> Void
-    let onDelete: () -> Void
-    let onViewInFeed: () -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            // Header Row
-            Button(action: onToggleExpand) {
-                HStack(alignment: .center, spacing: 8) {
-                    VStack(alignment: .leading, spacing: 3) {
-                        if let timeStr = formattedEntryTime(entry.date) {
-                            Text(timeStr)
-                                .font(.system(size: 11, weight: .semibold))
-                                .foregroundColor(JournalTheme.accent)
-                        }
-
-                        Text(entry.title.isEmpty ? "Untitled Entry" : entry.title)
-                            .font(JournalTheme.serifTitle(16.5, weight: .medium))
-                            .foregroundColor(JournalTheme.text)
-                            .multilineTextAlignment(.leading)
-                    }
-
-                    Spacer()
-
-                    if !isExpanded && !entry.photos.isEmpty {
-                        HStack(spacing: 3) {
-                            Image(systemName: "photo")
-                                .font(.system(size: 11))
-                            Text("\(entry.photos.count)")
-                                .font(.system(size: 11, weight: .medium))
-                        }
-                        .foregroundColor(JournalTheme.textFaint)
-                        .padding(.horizontal, 6)
-                        .padding(.vertical, 2)
-                        .background(JournalTheme.bgSunken)
-                        .clipShape(Capsule())
-                    }
-
-                    Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundColor(isExpanded ? JournalTheme.accent : JournalTheme.textFaint)
-                        .frame(width: 24, height: 24)
-                }
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-
-            // Content
-            if !isExpanded {
-                if !entry.body.isEmpty {
-                    Button(action: onToggleExpand) {
-                        Text(entry.body)
-                            .font(JournalTheme.serifProse(14))
-                            .foregroundColor(JournalTheme.textSoft)
-                            .lineLimit(2)
-                            .multilineTextAlignment(.leading)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                    }
-                    .buttonStyle(.plain)
-                }
-            } else {
-                expandedContent
-            }
-        }
-        .padding(.vertical, 3)
-    }
-
-    @ViewBuilder
-    private var expandedContent: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            if !entry.photos.isEmpty {
-                EntryGalleryView(photos: entry.photos)
-                    .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-            }
-
-            if !entry.body.isEmpty {
-                Text(entry.body)
-                    .font(JournalTheme.serifProse(15.5))
-                    .foregroundColor(JournalTheme.text)
-                    .lineSpacing(4)
-                    .textSelection(.enabled)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-            }
-
-            if !entry.tags.isEmpty {
+        HStack(alignment: .center, spacing: 12) {
+            // Left: Time, Title, & 2-Line Body Glimpse
+            VStack(alignment: .leading, spacing: 4) {
                 HStack(spacing: 6) {
-                    ForEach(entry.tags, id: \.self) { tag in
-                        Text("#\(tag)")
-                            .font(.system(size: 11.5, weight: .semibold))
-                            .padding(.horizontal, 8)
-                            .padding(.vertical, 3)
-                            .background(JournalTheme.accentSoft)
-                            .foregroundColor(JournalTheme.accent)
-                            .clipShape(Capsule())
-                    }
-                }
-            }
-
-            HStack(spacing: 12) {
-                Button(action: onEdit) {
-                    HStack(spacing: 4) {
-                        Image(systemName: "pencil")
+                    if let timeStr = formattedEntryTime(entry.date) {
+                        Text(timeStr)
                             .font(.system(size: 11, weight: .semibold))
-                        Text("Edit")
-                            .font(.system(size: 12, weight: .medium))
+                            .foregroundColor(JournalTheme.accent)
                     }
-                    .foregroundColor(JournalTheme.accent)
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 5)
-                    .background(JournalTheme.accentSoft)
-                    .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+
+                    if !entry.tags.isEmpty {
+                        Text("#\(entry.tags[0])")
+                            .font(.system(size: 10.5, weight: .medium))
+                            .foregroundColor(JournalTheme.textFaint)
+                    }
                 }
 
-                Button(action: onDelete) {
-                    HStack(spacing: 4) {
-                        Image(systemName: "trash")
-                            .font(.system(size: 11))
-                        Text("Delete")
-                            .font(.system(size: 12))
-                    }
-                    .foregroundColor(JournalTheme.textFaint)
-                }
+                Text(entry.title.isEmpty ? "Untitled Entry" : entry.title)
+                    .font(JournalTheme.serifTitle(16, weight: .medium))
+                    .foregroundColor(JournalTheme.text)
+                    .lineLimit(1)
 
-                Spacer()
-
-                Button(action: onViewInFeed) {
-                    HStack(spacing: 3) {
-                        Text("View in feed")
-                            .font(.system(size: 12, weight: .medium))
-                        Image(systemName: "arrow.right")
-                            .font(.system(size: 10, weight: .semibold))
-                    }
-                    .foregroundColor(JournalTheme.textSoft)
+                if !entry.body.isEmpty {
+                    Text(entry.body)
+                        .font(JournalTheme.serifProse(13.5))
+                        .foregroundColor(JournalTheme.textSoft)
+                        .lineLimit(2)
+                        .lineSpacing(2)
+                        .multilineTextAlignment(.leading)
                 }
             }
-            .padding(.top, 4)
+
+            Spacer(minLength: 8)
+
+            // Right: Photo Thumbnail (if available) + Navigation Chevron
+            HStack(spacing: 8) {
+                if let photoPath = entry.photos.first,
+                   let thumbURL = viewModel.resolveThumbURL(photoRelPath: photoPath),
+                   let image = UIImage(contentsOfFile: thumbURL.path) {
+                    Image(uiImage: image)
+                        .resizable()
+                        .aspectRatio(contentMode: .fill)
+                        .frame(width: 44, height: 44)
+                        .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                .stroke(JournalTheme.border, lineWidth: 1)
+                        )
+                }
+
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundColor(JournalTheme.textFaint)
+            }
         }
-        .transition(.opacity.combined(with: .move(edge: .top)))
+        .padding(.vertical, 4)
+        .contentShape(Rectangle())
     }
 
     private func formattedEntryTime(_ rawDate: String) -> String? {

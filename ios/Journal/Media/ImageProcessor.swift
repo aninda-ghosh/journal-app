@@ -8,14 +8,24 @@ import UniformTypeIdentifiers
 
 /// Result of processing a raw photograph for storage in Journal.
 public struct ProcessedImage: Sendable {
-    /// Full-resolution square photo JPEG data (max 1800x1800 px @ 88% quality).
+    /// Optimized square thumbnail JPEG data (max 512x512 px @ 82% quality).
     public let photoData: Data
-    /// Low-latency square thumbnail JPEG data (max 320x320 px @ 82% quality).
-    public let thumbData: Data
-    /// The pixel width and height of the processed square photo.
+    /// Low-latency square thumbnail JPEG data (alias to photoData).
+    public var thumbData: Data { photoData }
+    /// The pixel width and height of the processed square photo thumbnail.
     public let dimension: Int
-    /// The pixel width and height of the processed thumbnail.
-    public let thumbDimension: Int
+    /// The pixel width and height of the thumbnail (alias to dimension).
+    public var thumbDimension: Int { dimension }
+
+    public init(photoData: Data, dimension: Int) {
+        self.photoData = photoData
+        self.dimension = dimension
+    }
+
+    public init(photoData: Data, thumbData: Data, dimension: Int, thumbDimension: Int) {
+        self.photoData = photoData
+        self.dimension = dimension
+    }
 }
 
 public enum ImageProcessorError: LocalizedError {
@@ -37,14 +47,13 @@ public enum ImageProcessorError: LocalizedError {
 
 /// Preprocesses, center-crops, scales, and compresses images for Journal storage.
 ///
-/// Implements exact parity with `mac/src/renderer/app.js:squareCanvas`:
+/// Implements single-thumbnail storage parity with `mac/src/renderer/app.js`:
 /// - 1:1 square center crop.
-/// - Photo: max 1800x1800 px, JPEG 0.88 quality.
-/// - Thumbnail: max 320x320 px, JPEG 0.82 quality.
+/// - Single thumbnail photo: max 512x512 px, JPEG 0.82 quality.
 public struct ImageProcessor {
-    public static let photoMaxDimension: Int = 1800
-    public static let thumbMaxDimension: Int = 320
-    public static let photoQuality: Double = 0.88
+    public static let photoMaxDimension: Int = 512
+    public static let thumbMaxDimension: Int = 512
+    public static let photoQuality: Double = 0.82
     public static let thumbQuality: Double = 0.82
 
     /// Processes raw image data (JPEG, PNG, HEIC, TIFF, WebP, etc.).
@@ -68,19 +77,14 @@ public struct ImageProcessor {
         return try process(cgImage: originalCGImage)
     }
 
-    /// Processes an existing CGImage directly.
+    /// Processes an existing CGImage directly into a 512x512 center-cropped square JPEG thumbnail.
     public static func process(cgImage: CGImage) throws -> ProcessedImage {
         let photoCG = try scaleAndCenterCrop(cgImage: cgImage, maxDimension: photoMaxDimension)
-        let thumbCG = try scaleAndCenterCrop(cgImage: cgImage, maxDimension: thumbMaxDimension)
-
         let photoJPEG = try encodeToJPEG(cgImage: photoCG, quality: photoQuality)
-        let thumbJPEG = try encodeToJPEG(cgImage: thumbCG, quality: thumbQuality)
 
         return ProcessedImage(
             photoData: photoJPEG,
-            thumbData: thumbJPEG,
-            dimension: photoCG.width,
-            thumbDimension: thumbCG.width
+            dimension: photoCG.width
         )
     }
 

@@ -238,16 +238,8 @@ async function saveMedia({ name, photo, thumb, processed = true }) {
     Buffer.from(String(photo).split(',').pop(), 'base64')
   );
 
-  let thumbRel = null;
-  if (thumb) {
-    await fsp.writeFile(
-      path.join(dir, id + '.thumb.jpg'),
-      Buffer.from(String(thumb).split(',').pop(), 'base64')
-    );
-    thumbRel = `media/${year}/${month}/${id}.thumb.jpg`;
-  }
-
-  return { path: `media/${year}/${month}/${id}${ext}`, thumb: thumbRel };
+  // Single-thumbnail pipeline: only store the single optimized file
+  return { path: `media/${year}/${month}/${id}${ext}`, thumb: null };
 }
 
 /** Resolve a stored `media/...` path to a real file, refusing anything else. */

@@ -31,11 +31,10 @@ struct VerifyStorage {
 
             // Test 2: Save media
             let fakePhotoData = "fake-jpeg-photo-content".data(using: .utf8)!
-            let fakeThumbData = "fake-jpeg-thumb-content".data(using: .utf8)!
-            let mediaResult = try storage.saveMedia(photoData: fakePhotoData, thumbData: fakeThumbData, customUUID: "test-photo-1")
+            let mediaResult = try storage.saveMedia(photoData: fakePhotoData, customUUID: "test-photo-1")
 
             assertEqual(mediaResult.path.hasPrefix("media/"), true, "Photo path must start with media/")
-            assertEqual(mediaResult.thumbPath?.hasPrefix("media/"), true, "Thumb path must start with media/")
+            assertEqual(mediaResult.thumbPath == nil, true, "Thumb path must be nil in single thumbnail pipeline")
 
             // Test 3: Path traversal protection
             let safeURL = storage.resolveMedia(relPath: mediaResult.path)

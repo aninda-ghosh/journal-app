@@ -123,13 +123,16 @@ public enum JournalTheme {
 public struct JournalCardModifier: ViewModifier {
     public func body(content: Content) -> some View {
         content
-            .background(JournalTheme.bgRaised)
-            .clipShape(RoundedRectangle(cornerRadius: JournalTheme.cardRadius, style: .continuous))
+            .background(
+                RoundedRectangle(cornerRadius: JournalTheme.cardRadius, style: .continuous)
+                    .fill(JournalTheme.bgRaised)
+                    .shadow(color: JournalTheme.shadowColor, radius: 4, x: 0, y: 2)
+            )
             .overlay(
                 RoundedRectangle(cornerRadius: JournalTheme.cardRadius, style: .continuous)
                     .stroke(JournalTheme.border, lineWidth: 1)
             )
-            .shadow(color: JournalTheme.shadowColor, radius: 4, x: 0, y: 2)
+            .clipShape(RoundedRectangle(cornerRadius: JournalTheme.cardRadius, style: .continuous))
     }
 }
 

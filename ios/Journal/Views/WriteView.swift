@@ -45,7 +45,7 @@ public struct WriteView: View {
     }
 
     public var body: some View {
-        ScrollView(showsIndicators: false) {
+        ScrollView(.vertical, showsIndicators: false) {
             VStack(alignment: .leading, spacing: 18) {
                 // The Composer Card matching Screenshot 3
                 VStack(alignment: .leading, spacing: 16) {
@@ -173,6 +173,8 @@ public struct WriteView: View {
                                 }
                             }
                         }
+                        .scrollBounceBehavior(.basedOnSize, axes: .vertical)
+                        .clipped()
                     }
 
                     // Dashed Photo Dropzone (.dropzone in Screenshot 3)
@@ -306,13 +308,43 @@ public struct WriteView: View {
                 .padding(.horizontal, 18)
                 .padding(.bottom, 24)
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .background(JournalTheme.bg)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .scrollBounceBehavior(.basedOnSize, axes: .horizontal)
+        .clipped()
+        .background(JournalTheme.bg.ignoresSafeArea())
+        .onAppear {
+            if entryId == nil && !viewModel.draft.isEmpty {
+                title = viewModel.draft.title
+                bodyText = viewModel.draft.body
+                entryDate = viewModel.draft.date
+                tags = viewModel.draft.tags
+                photoPaths = viewModel.draft.photoPaths
+            }
+        }
         .onDisappear {
             if dictation.isRecording {
                 _ = dictation.stopImmediately()
             }
+            syncDraft()
         }
+        .onChange(of: title) { _, _ in syncDraft() }
+        .onChange(of: bodyText) { _, _ in syncDraft() }
+        .onChange(of: entryDate) { _, _ in syncDraft() }
+        .onChange(of: tags) { _, _ in syncDraft() }
+        .onChange(of: photoPaths) { _, _ in syncDraft() }
+    }
+
+    private func syncDraft() {
+        guard entryId == nil else { return }
+        viewModel.draft = JournalViewModel.DraftEntry(
+            title: title,
+            body: bodyText,
+            date: entryDate,
+            tags: tags,
+            photoPaths: photoPaths
+        )
     }
 
     // MARK: - Actions
@@ -440,9 +472,8 @@ public struct WriteView: View {
                     bodyText = ""
                     photoPaths.removeAll()
                     tags.removeAll()
-                    withAnimation(.easeInOut(duration: 0.2)) {
-                        viewModel.selectedTab = .calendar
-                    }
+                    viewModel.draft = JournalViewModel.DraftEntry()
+                    viewModel.selectedTab = .calendar
                 }
             } catch {
                 viewModel.errorMessage = "Failed to save: \(error.localizedDescription)"

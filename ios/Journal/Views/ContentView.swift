@@ -42,9 +42,7 @@ public struct ContentView: View {
                     HStack(spacing: 10) {
                         // "New entry" terracotta button
                         Button(action: {
-                            withAnimation(.easeInOut(duration: 0.15)) {
-                                viewModel.selectedTab = .write
-                            }
+                            viewModel.selectedTab = .write
                         }) {
                             HStack(spacing: 5) {
                                 Image(systemName: "plus")
@@ -80,18 +78,18 @@ public struct ContentView: View {
                     alignment: .bottom
                 )
 
-                // Active View Body
-                TabView(selection: $viewModel.selectedTab) {
-                    WriteView()
-                        .tag(JournalViewModel.Tab.write)
-
-                    CalendarView(onOpenSettings: { showSettings = true })
-                        .tag(JournalViewModel.Tab.calendar)
-
-                    EntriesView(onOpenSettings: { showSettings = true })
-                        .tag(JournalViewModel.Tab.entries)
+                // Active View Body (mutually exclusive mounting eliminates all ghost bleed-through)
+                Group {
+                    switch viewModel.selectedTab {
+                    case .write:
+                        WriteView()
+                    case .calendar:
+                        CalendarView(onOpenSettings: { showSettings = true })
+                    case .entries:
+                        EntriesView(onOpenSettings: { showSettings = true })
+                    }
                 }
-                .tabViewStyle(.page(indexDisplayMode: .never))
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
 
                 // Bottom Selection Tab Bar (matching theme colors, states, and styles)
                 VStack(spacing: 0) {
@@ -104,12 +102,10 @@ public struct ContentView: View {
                         HStack(spacing: 4) {
                             ForEach(JournalViewModel.Tab.allCases) { tab in
                                 Button(action: {
-                                    withAnimation(.easeInOut(duration: 0.15)) {
-                                        if viewModel.selectedTab == tab && tab == .entries && viewModel.dayFilter != nil {
-                                            viewModel.dayFilter = nil
-                                        }
-                                        viewModel.selectedTab = tab
+                                    if viewModel.selectedTab == tab && tab == .entries && viewModel.dayFilter != nil {
+                                        viewModel.dayFilter = nil
                                     }
+                                    viewModel.selectedTab = tab
                                 }) {
                                     HStack(spacing: 6) {
                                         Image(systemName: tabIcon(for: tab))
@@ -123,13 +119,16 @@ public struct ContentView: View {
                                     .foregroundColor(viewModel.selectedTab == tab ? JournalTheme.text : JournalTheme.textSoft)
                                     .padding(.horizontal, 16)
                                     .padding(.vertical, 8)
-                                    .background(viewModel.selectedTab == tab ? JournalTheme.bgRaised : Color.clear)
-                                    .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                                    .background(
+                                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                            .fill(viewModel.selectedTab == tab ? JournalTheme.bgRaised : Color.clear)
+                                            .shadow(color: viewModel.selectedTab == tab ? JournalTheme.shadowColor : Color.clear, radius: 2, x: 0, y: 1)
+                                    )
                                     .overlay(
                                         RoundedRectangle(cornerRadius: 8, style: .continuous)
                                             .stroke(viewModel.selectedTab == tab ? JournalTheme.border : Color.clear, lineWidth: 1)
                                     )
-                                    .shadow(color: viewModel.selectedTab == tab ? JournalTheme.shadowColor : Color.clear, radius: 2, x: 0, y: 1)
+                                    .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
                                 }
                             }
                         }
@@ -147,7 +146,11 @@ public struct ContentView: View {
                     .background(JournalTheme.bg)
                 }
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .clipped()
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .clipped()
         .environmentObject(viewModel)
         .sheet(isPresented: $showSettings) {
             StorageSettingsView()
