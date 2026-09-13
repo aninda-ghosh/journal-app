@@ -69,6 +69,10 @@ if (missing.length) {
 }
 
 const { pcm, rate, channels, bits } = readWavPcm(SAMPLE);
+if (rate !== 16000 || channels !== 1 || bits !== 16) {
+  console.error(`Sample must be 16kHz mono 16-bit PCM (got ${rate}Hz, ${channels}ch, ${bits}bit)`);
+  process.exit(1);
+}
 const seconds = pcm.length / (rate * channels * (bits / 8));
 
 console.log(`model    ${path.basename(MODEL)}`);

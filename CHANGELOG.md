@@ -6,9 +6,126 @@ Version numbers read left to right: the first changes only if you'd have to do
 something differently, the second when something new is added, and the third
 when something is fixed.
 
-## Unreleased
+## 2.0.1 — 2026-09-12
 
-Nothing yet.
+### Photos are stored as one 256px square
+
+The photo pipeline is now single-tier on both platforms, and this changes what
+lands on your disk — so it is worth reading before you update.
+
+- **One file per photo.** A photo is centre-cropped to a 1:1 square, scaled to
+  256×256 and encoded as JPEG at 0.82 quality. If the lower dimension is less
+  than 256px, it is enlarged to 256px; if larger, it is downscaled. That square
+  is the only copy kept: the file you picked is not stored beside it, and the
+  crop cannot be undone. Keep your originals in Photos, or wherever you already
+  keep them.
+- **The `.thumb.jpg` tier is gone.** At 256px the stored square is already small
+  enough to serve the calendar and the feed directly, and a second tier doubled
+  the file count every iCloud sync had to reconcile.
+- **Nothing already on disk changes.** Photos stored at the old size still
+  display at that size; entries keep pointing at exactly the files they always
+  did. Old `.thumb.jpg` files simply become unreferenced.
+- **Feed gallery portrait aspect ratio fixed.** Single-photo feed cards no
+  longer constrain the image to a fixed-height landscape box that sheared
+  additional slices off portrait and square photos.
+- **Journal → Reclaim Unused Photos…** finds photos no entry refers to —
+  including those orphaned thumbnails — and moves them to the Trash, never
+  straight to nowhere.
+- **Two-column entry layout with fixed-size media.** Entries with photos
+  now display as a two-column card with a compact 220px fixed image on the left
+  and prose in the larger right section. The image remains crisp without
+  expanding when the window widens, and stacks vertically on narrow viewports.
+- **Book-like justified prose.** Paragraphs in entries on both macOS and iOS
+  now render with justified margins and natural hyphenation for a refined,
+  publication-grade reading experience.
+- **Migration tool for existing libraries.** Added `mac/tools/migrate-media-256.swift`
+  to safely convert historical photo collections into 256×256 px squares with
+  automatic backup.
+
+### Fixed
+
+- **Editing an entry no longer restamps it.** Saving an edit rewrote the entry's
+  `date` to the current moment while its id kept the original day, so the
+  calendar and the feed disagreed about when it was written, permanently.
+- **Two entries in a row on iPhone could overwrite each other.** The id was
+  taken from when the composer opened rather than when Save was pressed, so a
+  second entry written without leaving the tab silently replaced the first.
+- **Entries written on the Mac now read properly on iPhone.** The phone wrote a
+  space where the Mac writes a `T` in timestamps, and only accepted its own
+  form — so every Mac-written entry showed a raw `2026-09-08T14:30:00` in the
+  feed and no time at all in the calendar. Both forms are accepted now; `T` is
+  written.
+- **Dates no longer break on non-Gregorian calendars.** Every date formatter
+  that touches the stored format is pinned to a fixed calendar and locale. A
+  device set to a Buddhist or Japanese calendar was writing era years into
+  entry ids.
+- **Photos from an iPhone are no longer stored sideways.** EXIF orientation was
+  never applied, so portrait photos were saved rotated — and centre-cropped on
+  the wrong axis. Transparent images are also flattened onto white rather than
+  black, matching the Mac.
+- **Dictation no longer repeats itself.** Each pass of the speech engine was
+  seeded with the previous pass's text; over an overlapping window that feeds
+  itself, and phrases began to loop.
+- **The last words of a take are kept.** On iPhone, results arriving in the
+  moment after you stop were discarded by the very code that waited for them.
+  On the Mac, a slow finish threw away the whole ramble instead of handing back
+  what it had heard.
+- **A failed start releases the microphone.** If audio capture failed part-way,
+  the microphone stayed live and the button believed it was still recording.
+- **Dictation failures are reported while they matter.** The speech engine
+  reports readiness before the model has finished loading, so it can still fail
+  once you are mid-sentence; the window is now told, instead of letting you talk
+  into nothing until you stop.
+- **The speech helper no longer aborts on a bad model.** It crashed rather than
+  exiting when the weights could not be loaded.
+- **Entries evicted by iCloud come back.** On iPhone the placeholder files that
+  iCloud leaves behind are hidden, and the enumerator was skipping hidden files
+  — so the code meant to download them could never run, and the entries just
+  disappeared from the list.
+- **An unsaved draft survives the app being killed** on iPhone, as it already
+  did on the Mac.
+- **Entry bodies render as Markdown on iPhone** instead of showing raw
+  asterisks.
+- **Save is no longer offered for a title with nothing under it**, which storage
+  would refuse anyway.
+- **Typing while dictating no longer duplicates the spoken text.**
+- **`journal://` cannot reach outside `media/`.** The path check confirmed only
+  that a request stayed inside the journal folder.
+- **The window can ask for the microphone, and only the microphone.** The
+  permission handler also covered the camera.
+- **Dark mode's accent tint is visible again** — an eight-digit hex made it
+  12.5% opaque, so tag chips nearly vanished.
+- **Keyboard focus is visible**, and the calendar's day buttons have accessible
+  names. Reduced-motion preferences are respected.
+
+### Improved
+
+- **Photos are decoded once, off the main thread, on iPhone.** A month of
+  calendar tiles was decoding up to 31 JPEGs on the main thread on every
+  redraw. Importing a photo no longer freezes the composer either.
+- **The renderer runs sandboxed**, and no longer leaks a preview image per photo
+  added.
+- **`make.command` tracks dependency freshness.** Modifying `transcriber.cpp` or
+  `CMakeLists.txt` automatically triggers a rebuild of the speech helper, and
+  editing `package.json` updates dependencies. Packaging warns if the transcriber
+  is missing.
+- **`whisper-check.js` strictly validates PCM format.** Asserts that input audio
+  is 16 kHz mono 16-bit PCM before starting the speech engine.
+
+### Added
+
+- **[`docs/FORMAT.md`](docs/FORMAT.md)** — the entry format written down as a
+  contract rather than implied by two implementations.
+- **`spec/fixtures/`** — one Markdown file per awkward case and the parse it
+  must produce. Both platforms check themselves against the same files, so a
+  drift between them fails a test instead of surfacing as a wrong date on
+  someone's phone.
+- **Continuous integration** — the format fixtures, the desktop end-to-end
+  suite, the iPhone verification suites and the Xcode build, and a compile of
+  the speech engine.
+- **`ios/run-tests.sh`** — every iPhone suite in one command, instead of five
+  `swiftc` lines copied out of the docs.
+- **Linting** (`npm run lint`) and an `.editorconfig`.
 
 ## 2.0.0 — 2026-09-12
 

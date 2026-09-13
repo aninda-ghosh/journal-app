@@ -47,6 +47,11 @@ contextBridge.exposeInMainWorld('journal', {
     ipcRenderer.on('dictation:partial', (_event, text) => handler(String(text || '')));
   },
 
+  /** The transcriber gave up mid-take. Whatever was heard is still yours. */
+  onFailed: (handler) => {
+    ipcRenderer.on('dictation:failed', (_event, message) => handler(String(message || '')));
+  },
+
   /** Turn a stored `media/…` path into something an <img> can load. */
   mediaUrl: (relPath) => 'journal://media/' + String(relPath)
     .replace(/^\/*media\//, '')

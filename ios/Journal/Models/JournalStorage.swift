@@ -42,6 +42,14 @@ public class JournalStorage {
     }
 
     private static let bookmarkKey = "journal_scoped_folder_bookmark"
+
+    /// `Journal` inside the app's own Documents folder — where the writing lives
+    /// until someone picks an iCloud Drive folder instead.
+    private static func defaultLocalRoot() -> URL {
+        let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first
+            ?? URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("Documents", isDirectory: true)
+        return docs.appendingPathComponent("Journal", isDirectory: true)
+    }
     private var isAccessingSecurityScopedResource = false
 
     /// Initializes storage.
@@ -58,8 +66,7 @@ public class JournalStorage {
             self.isAccessingSecurityScopedResource = true
         } else {
             // Local fallback for when no custom folder has been chosen yet
-            let localDocs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
-            let journalFolder = localDocs.appendingPathComponent("Journal", isDirectory: true)
+            let journalFolder = JournalStorage.defaultLocalRoot()
             self.rootURL = journalFolder.standardizedFileURL
             self.isUsingiCloud = false
         }
@@ -135,8 +142,7 @@ public class JournalStorage {
             isAccessingSecurityScopedResource = false
         }
         UserDefaults.standard.removeObject(forKey: JournalStorage.bookmarkKey)
-        let localDocs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
-        self.rootURL = localDocs.appendingPathComponent("Journal", isDirectory: true).standardizedFileURL
+        self.rootURL = JournalStorage.defaultLocalRoot().standardizedFileURL
         self.isUsingiCloud = false
         try? ensureDirs()
     }
@@ -177,10 +183,13 @@ public class JournalStorage {
         guard fm.fileExists(atPath: entriesURL.path) else { return [] }
 
         var entries: [Entry] = []
+        // Deliberately *not* .skipsHiddenFiles: iCloud replaces an evicted entry
+        // with a hidden placeholder, so skipping hidden files hides every entry
+        // iCloud has taken away — and then never asks for it back.
         let enumerator = fm.enumerator(
             at: entriesURL,
             includingPropertiesForKeys: [.isRegularFileKey, .ubiquitousItemDownloadingStatusKey],
-            options: [.skipsHiddenFiles]
+            options: []
         )
 
         while let fileURL = enumerator?.nextObject() as? URL {
@@ -191,6 +200,7 @@ public class JournalStorage {
                 try? fm.startDownloadingUbiquitousItem(at: fileURL)
                 continue
             }
+            if filename.hasPrefix(".") { continue }
 
             guard filename.hasSuffix(".md") else { continue }
             let id = String(filename.dropLast(3))
@@ -339,13 +349,15 @@ public class JournalStorage {
 
     // MARK: - Media Storage
 
-    /// Saves optimized thumbnail JPEG into `media/YYYY/MM/<id>.jpg`.
-    /// Only the single optimized thumbnail is stored, saving disk space and iCloud sync bandwidth.
+    /// Saves the square JPEG into `media/YYYY/MM/<id>.jpg` and returns its
+    /// journal-relative path.
+    ///
+    /// One file per photo: that square is the only copy kept, which is what
+    /// keeps an iCloud-synced journal small enough to sync over a phone plan.
     public func saveMedia(
         photoData: Data,
-        thumbData: Data? = nil,
         customUUID: String? = nil
-    ) throws -> (path: String, thumbPath: String?) {
+    ) throws -> String {
         guard !photoData.isEmpty else {
             throw JournalStorageError.invalidMediaData
         }
@@ -369,8 +381,7 @@ public class JournalStorage {
         let photoURL = targetDir.appendingPathComponent(photoFilename, isDirectory: false)
         try photoData.write(to: photoURL, options: .atomic)
 
-        let relPhotoPath = "media/\(year)/\(month)/\(photoFilename)"
-        return (path: relPhotoPath, thumbPath: nil)
+        return "media/\(year)/\(month)/\(photoFilename)"
     }
 
     /// Resolves a relative `media/...` path to an absolute URL, guaranteeing that

@@ -42,11 +42,12 @@ public enum JournalTheme {
     })
 
     /// Primary text (#2b2622 in light, #e8e4de in dark).
-    public static let text = Color(UIColor { traits in
+    public static let uiText = UIColor { traits in
         traits.userInterfaceStyle == .dark
             ? UIColor(red: 0xe8/255.0, green: 0xe4/255.0, blue: 0xde/255.0, alpha: 1.0)
             : UIColor(red: 0x2b/255.0, green: 0x26/255.0, blue: 0x22/255.0, alpha: 1.0)
-    })
+    }
+    public static let text = Color(uiText)
 
     /// Soft text (#6b625a in light, #a39d96 in dark).
     public static let textSoft = Color(UIColor { traits in
@@ -101,6 +102,16 @@ public enum JournalTheme {
         return .system(size: size, weight: weight, design: .serif)
     }
 
+    /// UIKit serif font matching serifProse.
+    public static func uiSerifProse(_ size: CGFloat = 16.5) -> UIFont {
+        if let font = UIFont(name: "IowanOldStyle-Roman", size: size) {
+            return font
+        }
+        return UIFont(name: "Palatino", size: size)
+            ?? UIFont(name: "Georgia", size: size)
+            ?? UIFont.systemFont(ofSize: size)
+    }
+
     /// Wordmark font used in the app navigation header.
     public static var wordmark: Font {
         if UIFont(name: "IowanOldStyle-Bold", size: 21) != nil {
@@ -116,6 +127,22 @@ public enum JournalTheme {
     public static let chipRadius: CGFloat = 20
 
     public static let shadowColor = Color.black.opacity(0.04)
+}
+
+// MARK: - Markdown
+
+public enum JournalMarkdown {
+    /// Entry bodies are Markdown on disk and the Mac renders them, so the phone
+    /// shouldn't be showing raw asterisks. Inline-only parsing keeps the
+    /// writing's own line breaks, which a journal entry depends on.
+    public static func rendered(_ body: String) -> AttributedString {
+        let options = AttributedString.MarkdownParsingOptions(
+            allowsExtendedAttributes: false,
+            interpretedSyntax: .inlineOnlyPreservingWhitespace,
+            failurePolicy: .returnPartiallyParsedIfPossible
+        )
+        return (try? AttributedString(markdown: body, options: options)) ?? AttributedString(body)
+    }
 }
 
 // MARK: - View Modifiers
@@ -145,3 +172,60 @@ public extension View {
         self.background(JournalTheme.bg.ignoresSafeArea())
     }
 }
+
+// MARK: - Justified Markdown Text
+
+/// A self-sizing view that renders Markdown prose with justified text alignment,
+/// matching the desktop app's `.prose` style (`text-align: justify`).
+public struct JustifiedMarkdownText: UIViewRepresentable {
+    public let markdown: String
+    public var fontSize: CGFloat
+    public var lineSpacing: CGFloat
+
+    public init(_ markdown: String, fontSize: CGFloat = 16.5, lineSpacing: CGFloat = 5) {
+        self.markdown = markdown
+        self.fontSize = fontSize
+        self.lineSpacing = lineSpacing
+    }
+
+    public func makeUIView(context: Context) -> UILabel {
+        let label = UILabel()
+        label.numberOfLines = 0
+        label.lineBreakMode = .byWordWrapping
+        label.textAlignment = .justified
+        label.backgroundColor = .clear
+        label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        label.setContentHuggingPriority(.required, for: .vertical)
+        return label
+    }
+
+    public func updateUIView(_ label: UILabel, context: Context) {
+        let font = JournalTheme.uiSerifProse(fontSize)
+        let paragraphStyle = NSMutableParagraphStyle()
+        paragraphStyle.alignment = .justified
+        paragraphStyle.lineSpacing = lineSpacing
+        paragraphStyle.hyphenationFactor = 0.9
+
+        let options = AttributedString.MarkdownParsingOptions(
+            allowsExtendedAttributes: false,
+            interpretedSyntax: .inlineOnlyPreservingWhitespace,
+            failurePolicy: .returnPartiallyParsedIfPossible
+        )
+        let attr = (try? AttributedString(markdown: markdown, options: options)) ?? AttributedString(markdown)
+        let nsAttr = NSMutableAttributedString(attr)
+
+        let fullRange = NSRange(location: 0, length: nsAttr.length)
+        nsAttr.addAttribute(.paragraphStyle, value: paragraphStyle, range: fullRange)
+        nsAttr.addAttribute(.font, value: font, range: fullRange)
+        nsAttr.addAttribute(.foregroundColor, value: JournalTheme.uiText, range: fullRange)
+
+        label.attributedText = nsAttr
+    }
+
+    public func sizeThatFits(_ proposal: ProposedViewSize, uiView: UILabel, context: Context) -> CGSize? {
+        guard let width = proposal.width, width > 0 else { return nil }
+        uiView.preferredMaxLayoutWidth = width
+        return uiView.sizeThatFits(CGSize(width: width, height: .greatestFiniteMagnitude))
+    }
+}
+

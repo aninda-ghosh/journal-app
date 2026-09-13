@@ -227,9 +227,7 @@ public struct EntriesView: View {
     }
 
     private func formattedDayHeader(_ dayKey: String) -> String {
-        let inFormatter = DateFormatter()
-        inFormatter.dateFormat = "yyyy-MM-dd"
-        guard let date = inFormatter.date(from: dayKey) else { return dayKey }
+        guard let date = Entry.parseStamp(dayKey) else { return dayKey }
         let outFormatter = DateFormatter()
         outFormatter.dateFormat = "EEEE, MMMM d, yyyy"
         return outFormatter.string(from: date)
@@ -281,12 +279,9 @@ struct EntryCard: View {
                 EntryGalleryView(photos: entry.photos)
             }
 
-            // Body text in book-like serif prose (.prose in style.css)
+            // Body text in book-like justified serif prose (.prose in style.css)
             if !entry.body.isEmpty {
-                Text(entry.body)
-                    .font(JournalTheme.serifProse(16.5))
-                    .foregroundColor(JournalTheme.text)
-                    .lineSpacing(5)
+                JustifiedMarkdownText(entry.body)
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
 
@@ -312,29 +307,22 @@ struct EntryCard: View {
     }
 
     private func formattedDate(_ rawDate: String) -> String {
-        let inFormatter = DateFormatter()
-        inFormatter.dateFormat = "yyyy-MM-dd HH:mm:ss"
-        if let date = inFormatter.date(from: rawDate) {
-            let outFormatter = DateFormatter()
-            outFormatter.dateFormat = "EEEE, MMMM d, yyyy · h:mm a"
-            return outFormatter.string(from: date).uppercased()
-        }
-
-        // Try date-only format
-        inFormatter.dateFormat = "yyyy-MM-dd"
-        if let date = inFormatter.date(from: rawDate) {
-            let outFormatter = DateFormatter()
-            outFormatter.dateFormat = "EEEE, MMMM d, yyyy"
-            return outFormatter.string(from: date).uppercased()
-        }
-
-        return rawDate.uppercased()
+        // Parsed with a fixed calendar — the stored value is a wire format, and
+        // the Mac writes a `T` where older iOS builds wrote a space. Before this,
+        // every entry written on the Mac showed here as a raw timestamp.
+        guard let date = Entry.parseStamp(rawDate) else { return rawDate.uppercased() }
+        let outFormatter = DateFormatter()
+        outFormatter.dateFormat = rawDate.count <= 10
+            ? "EEEE, MMMM d, yyyy"
+            : "EEEE, MMMM d, yyyy · h:mm a"
+        return outFormatter.string(from: date).uppercased()
     }
 }
 
 /// Gallery layout matching `.gallery` in style.css.
 struct EntryGalleryView: View {
     @EnvironmentObject var viewModel: JournalViewModel
+    @ObservedObject private var store = PhotoStore.shared
     let photos: [String]
 
     var body: some View {
@@ -342,12 +330,11 @@ struct EntryGalleryView: View {
             if photos.count == 1 {
                 // Single photo: Full width inside card (Grand Canyon layout in Screenshot 2)
                 if let url = viewModel.resolveMediaURL(relPath: photos[0]),
-                   let image = UIImage(contentsOfFile: url.path) {
+                   let image = store.image(at: url) {
                     Image(uiImage: image)
                         .resizable()
-                        .aspectRatio(contentMode: .fill)
-                        .frame(maxWidth: .infinity)
-                        .frame(maxHeight: 280)
+                        .aspectRatio(contentMode: .fit)
+                        .frame(maxWidth: 256, maxHeight: 256)
                         .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
                         .overlay(
                             RoundedRectangle(cornerRadius: 10, style: .continuous)
@@ -358,8 +345,8 @@ struct EntryGalleryView: View {
                 // Two photos: 2-column split
                 HStack(spacing: 6) {
                     ForEach(photos, id: \.self) { path in
-                        if let url = viewModel.resolveThumbURL(photoRelPath: path),
-                           let image = UIImage(contentsOfFile: url.path) {
+                        if let url = viewModel.resolveMediaURL(relPath: path),
+                           let image = store.image(at: url) {
                             Image(uiImage: image)
                                 .resizable()
                                 .aspectRatio(1, contentMode: .fill)
@@ -375,8 +362,8 @@ struct EntryGalleryView: View {
                 // 3 or more photos: 3-column grid
                 LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 6), count: 3), spacing: 6) {
                     ForEach(photos.prefix(6), id: \.self) { path in
-                        if let url = viewModel.resolveThumbURL(photoRelPath: path),
-                           let image = UIImage(contentsOfFile: url.path) {
+                        if let url = viewModel.resolveMediaURL(relPath: path),
+                           let image = store.image(at: url) {
                             Image(uiImage: image)
                                 .resizable()
                                 .aspectRatio(1, contentMode: .fill)

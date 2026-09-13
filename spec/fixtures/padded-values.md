@@ -1,0 +1,9 @@
+---
+id:   2026-09-08-143000   
+date:   2026-09-08T14:30:00
+title:    Spaces around every value   
+tags:   one ,  two ,, three  
+photos:   media/2026/09/a.jpg ,  
+---
+
+Values carry stray whitespace.

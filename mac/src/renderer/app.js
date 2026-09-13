@@ -16,7 +16,7 @@ const state = {
   activeTags: new Set(),
   dayFilter: null,       // 'YYYY-MM-DD' when you click a calendar day
   editingId: null,
-  photos: []             // [{ path, thumb, url, pending }]
+  photos: []             // [{ path, url, pending }]
 };
 
 const $ = (sel) => document.querySelector(sel);
@@ -78,11 +78,6 @@ function formatLongDate(dateStr) {
   }) + ' · ' + d.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
 }
 
-/** media/2026/09/x.jpg -> media/2026/09/x.thumb.jpg */
-function thumbFor(photoPath) {
-  return photoPath.replace(/\.[^.\/]+$/, '') + '.thumb.jpg';
-}
-
 /** A stored path -> a URL this window is allowed to load. */
 const src = (relPath) => window.journal.mediaUrl(relPath);
 
@@ -96,8 +91,8 @@ function toast(message) {
 
 // ------------------------------------------------- a small markdown pass
 
-function renderMarkdown(src) {
-  const lines = escapeHtml(src).split('\n');
+function renderMarkdown(markdown) {
+  const lines = escapeHtml(markdown).split('\n');
   const out = [];
   let paragraph = [];
   let list = null; // 'ul' | 'ol'
@@ -182,9 +177,15 @@ async function saveEntry() {
     return;
   }
 
+  const editing = state.editingId
+    ? state.entries.find((e) => e.id === state.editingId)
+    : null;
+
   const payload = {
     id: state.editingId,
-    date: state.editingId ? undefined : $('#date').value,
+    // Keep the entry's own timestamp when editing. Anything else quietly
+    // restamps a years-old entry with today's date.
+    date: editing ? editing.date : $('#date').value,
     title: $('#title').value,
     body,
     tags: currentTags(),
@@ -238,21 +239,21 @@ function fileToDataUrl(file) {
   });
 }
 
-/* Photos are squared and shrunk before they're stored. A year of daily
-   photographs at full size runs to several gigabytes; at 2048px square it's a
-   few hundred megabytes. The trade is real and permanent: the sides of every
-   frame are gone once written, so this is the one place the app destroys
-   something it can't get back. */
+/* Photos are squared, shrunk and re-encoded on the way in, and the result is
+   the only copy kept — the file you chose is never written to disk as it came.
+   The trade is real and permanent: the sides of every frame are gone, and so
+   is any detail beyond 256px. What it buys is a journal small enough to sync
+   over iCloud and to keep forever — a year of daily photographs is tens of
+   megabytes rather than several gigabytes. This is the one place the app
+   destroys something you can't get back, so it is worth knowing about. */
 
-const PHOTO_MAX = 512;    // stored photo thumbnail, square
-const THUMB_MAX = 512;    // browsing copy, square
+const PHOTO_MAX = 256;    // the stored photo, 256px square
 
-/** Centre-crop to a square and scale down. Never scales up. */
-function squareCanvas(img, max) {
+/** Centre-crop to a square and scale to 256px. */
+function squareCanvas(img, size = PHOTO_MAX) {
   const side = Math.min(img.naturalWidth, img.naturalHeight);
   const left = (img.naturalWidth - side) / 2;
   const top = (img.naturalHeight - side) / 2;
-  const size = Math.max(1, Math.min(max, side));
 
   const canvas = el('canvas', { width: size, height: size });
   const ctx = canvas.getContext('2d');
@@ -268,11 +269,10 @@ function squareCanvas(img, max) {
 }
 
 /**
- * Turn a chosen file into what actually gets stored.
- * Generates a single lightweight 512px square thumbnail @ 82% quality.
- * Returns null if the browser can't decode it — some cameras and phones write
- * formats Chromium won't open, and losing the photo would be far worse than
- * storing it at full size.
+ * Turn a chosen file into what actually gets stored: one 256px square JPEG at
+ * 82% quality. Returns null if the browser can't decode it — some cameras and
+ * phones write formats Chromium won't open, and losing the photo would be far
+ * worse than storing it at full size.
  */
 async function prepareImage(file) {
   const url = URL.createObjectURL(file);
@@ -281,8 +281,7 @@ async function prepareImage(file) {
     if (!img.naturalWidth || !img.naturalHeight) return null;
     return {
       photo: squareCanvas(img, PHOTO_MAX).toDataURL('image/jpeg', 0.82),
-      thumb: null,
-      size: Math.min(PHOTO_MAX, Math.min(img.naturalWidth, img.naturalHeight))
+      size: PHOTO_MAX
     };
   } catch {
     return null;
@@ -295,7 +294,7 @@ async function addPhotos(files) {
   for (const file of files) {
     if (!file.type.startsWith('image/') && !/\.(heic|heif)$/i.test(file.name)) continue;
 
-    const slot = { path: null, thumb: null, url: URL.createObjectURL(file), pending: true };
+    const slot = { path: null, url: URL.createObjectURL(file), pending: true };
     state.photos.push(slot);
     renderThumbs();
 
@@ -303,20 +302,24 @@ async function addPhotos(files) {
       const ready = await prepareImage(file);
       const stored = ready
         ? await window.journal.saveMedia({
-            name: file.name, photo: ready.photo, thumb: null, processed: true
+            name: file.name, photo: ready.photo, processed: true
           })
         : await window.journal.saveMedia({
-            name: file.name, photo: await fileToDataUrl(file), thumb: null, processed: false
+            name: file.name, photo: await fileToDataUrl(file), processed: false
           });
 
       if (!ready) toast(`Couldn't resize ${file.name} — kept it as it came.`);
 
       slot.path = stored.path;
-      slot.thumb = stored.thumb || stored.path;
       slot.pending = false;
     } catch (err) {
       toast('Could not add ' + file.name);
       state.photos.splice(state.photos.indexOf(slot), 1);
+    } finally {
+      // The preview blob has done its job either way; without this every photo
+      // added in a session stays in memory until the window closes.
+      URL.revokeObjectURL(slot.url);
+      slot.url = null;
     }
     renderThumbs();
   }
@@ -349,7 +352,7 @@ function renderThumbs() {
   state.photos.forEach((photo, index) => {
     const wrap = el('div', { className: 'thumb' + (photo.pending ? ' pending' : '') });
     wrap.append(el('img', {
-      src: photo.pending ? photo.url : src(photo.thumb || photo.path),
+      src: photo.pending ? photo.url : src(photo.path),
       alt: ''
     }));
     if (photo.pending) {
@@ -385,7 +388,7 @@ function editEntry(id) {
   const entry = state.entries.find((e) => e.id === id);
   if (!entry) return;
   state.editingId = id;
-  state.photos = entry.photos.map((p) => ({ path: p, thumb: thumbFor(p), pending: false }));
+  state.photos = entry.photos.map((p) => ({ path: p, pending: false }));
   $('#title').value = entry.title || '';
   $('#body').value = entry.body || '';
   $('#date').value = dayKeyOf(entry);
@@ -488,15 +491,19 @@ function renderCalendar() {
     const dayEntries = byDay.get(key) || [];
     const photo = dayPhoto(dayEntries);
 
-    const cell = el('button', { className: 'day' });
+    const cell = el('button', { className: 'day', type: 'button' });
+    const dayLabel = new Date(year, month, day).toLocaleDateString(undefined, {
+      weekday: 'long', month: 'long', day: 'numeric', year: 'numeric'
+    });
+    cell.setAttribute('aria-label', dayEntries.length
+      ? `${dayLabel} — ${dayEntries.length} ${dayEntries.length === 1 ? 'entry' : 'entries'}`
+      : `${dayLabel} — nothing written`);
     if (dayEntries.length) { cell.classList.add('has-entry'); daysWritten++; }
     if (photo) cell.classList.add('has-photo');
     if (key === todayKey()) cell.classList.add('today');
 
     if (photo) {
-      const img = el('img', { src: src(thumbFor(photo)), alt: '', loading: 'lazy' });
-      img.addEventListener('error', () => { img.src = src(photo); }, { once: true });
-      cell.append(img);
+      cell.append(el('img', { src: src(photo), alt: '', loading: 'lazy' }));
     }
 
     cell.append(el('span', { className: 'num', textContent: String(day) }));
@@ -598,24 +605,28 @@ function renderEntryList() {
 
     if (entry.title) article.append(el('h3', { textContent: entry.title }));
 
+    const content = el('div', {
+      className: 'entry-content' + (entry.photos.length ? ' has-media' : '')
+    });
+
     if (entry.photos.length) {
       const n = entry.photos.length;
       const gallery = el('div', {
         className: 'gallery ' + (n === 1 ? 'n1' : n === 2 ? 'n2' : n === 3 ? 'n3' : 'many')
       });
       for (const photo of entry.photos) {
-        const img = el('img', { src: src(thumbFor(photo)), alt: '', loading: 'lazy' });
-        img.addEventListener('error', () => { img.src = src(photo); }, { once: true });
+        const img = el('img', { src: src(photo), alt: '', loading: 'lazy' });
         img.addEventListener('click', () => openLightbox(src(photo)));
         gallery.append(img);
       }
-      article.append(gallery);
+      content.append(gallery);
     }
 
+    const main = el('div', { className: 'entry-main' });
     if (entry.body.trim()) {
       const prose = el('div', { className: 'prose' });
       prose.innerHTML = renderMarkdown(entry.body);
-      article.append(prose);
+      main.append(prose);
     }
 
     if (entry.tags.length) {
@@ -629,16 +640,24 @@ function renderEntryList() {
         });
         tags.append(chip);
       }
-      article.append(tags);
+      main.append(tags);
+    }
+
+    if (main.hasChildNodes()) {
+      content.append(main);
+    }
+
+    if (content.hasChildNodes()) {
+      article.append(content);
     }
 
     list.append(article);
   }
 }
 
-function openLightbox(src) {
+function openLightbox(url) {
   const box = el('div', { className: 'lightbox' });
-  box.append(el('img', { src, alt: '' }));
+  box.append(el('img', { src: url, alt: '' }));
   const close = el('button', { className: 'close', textContent: '×' });
   box.append(close);
   const dismiss = () => { box.remove(); document.removeEventListener('keydown', onKey); };
@@ -789,10 +808,10 @@ const dictate = {
 /** The stretch of the entry currently being spoken into. */
 const live = { start: 0, length: 0, prefix: 0, active: false };
 
-function setDictateState(state, label) {
-  dictate.button.classList.toggle('listening', state === 'listening');
-  dictate.button.classList.toggle('working', state === 'working');
-  dictate.button.disabled = state === 'working';
+function setDictateState(phase, label) {
+  dictate.button.classList.toggle('listening', phase === 'listening');
+  dictate.button.classList.toggle('working', phase === 'working');
+  dictate.button.disabled = phase === 'working';
   dictate.label.textContent = label;
 }
 
@@ -866,6 +885,17 @@ function resetDictateButton() {
 }
 
 window.journal.onPartial(showSpoken);
+
+// The engine can fall over after it has said it's ready — it loads the model
+// while you're already talking. Close the take rather than leaving the button
+// spinning, and keep any words that did make it in.
+window.journal.onFailed((message) => {
+  if (!window.Dictation.isRecording() && !live.active) return;
+  window.Dictation.cancel().catch(() => {});
+  if (live.active) closeLiveRegion();
+  resetDictateButton();
+  toast(message || 'Dictation stopped.');
+});
 
 async function startDictation() {
   try {

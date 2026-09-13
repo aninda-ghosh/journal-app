@@ -106,7 +106,7 @@ flowchart TB
 | **iOS** | **ViewModel** | Swift `@MainActor` | UI Actor | Memory / Storage Bridge | State management, active date/tag filters, photo selection, CRUD operations, reactive updates. |
 | **iOS** | **Storage Engine** | Swift `FileManager` | Background Task | Security-Scoped Directory | Folder bookmark resolution, file coordination, markdown frontmatter serialization. |
 | **iOS** | **Dictation Engine** | `AVAudioEngine`, `Speech` | Neural Engine & MainActor | Microphone Hardware | 100% on-device speech-to-text, audio buffer relay, pause survival, instant synchronous teardown on save. |
-| **iOS** | **Image Processor** | `UIGraphicsImageRenderer` | CPU / GPU CoreGraphics | Memory buffers | 1:1 center-crop, dual-tier JPEG compression (full-res 1800x1800 at 0.88, thumb 320x320 at 0.82). |
+| **iOS** | **Image Processor** | `CGImageSource` / `CGImageDestination` | CPU / GPU CoreGraphics | Memory buffers | 1:1 centre-crop, single-tier JPEG compression (256x256 at 0.82). The picked original is not retained. |
 
 ---
 
@@ -403,8 +403,7 @@ Storage is completely transparent and file-manager friendly. No proprietary SQLi
 └── media/
     └── YYYY/
         └── MM/
-            ├── <uuid>.jpg                  <-- Full-resolution photo
-            └── <uuid>.thumb.jpg            <-- Low-latency thumbnail
+            └── <uuid>.jpg                  <-- 256x256 square, the only copy kept
 ```
 
 #### Markdown Format Schema
@@ -423,7 +422,7 @@ Entry body written in standard markdown...
 
 ### Client-Side Canvas Image Processing Pipeline
 
-To maintain high performance without disk bloat, images are transformed on an offscreen HTML5 `<canvas>` in the renderer before touching the disk:
+Images are transformed on an offscreen HTML5 `<canvas>` in the renderer before touching the disk. **The pipeline is single-tier: one 256x256 square per photo, and it is the only copy stored.** The file the writer picked is never written to disk, and the crop and downscale are not reversible — this is the one place the app destroys something it cannot get back, and it is a deliberate trade for a journal that stays small enough to sync and to keep forever.
 
 ```mermaid
 flowchart TD
@@ -432,31 +431,29 @@ flowchart TD
 
     subgraph Transformations["Canvas Transformations"]
         Crop["Center Square Crop (1:1 Aspect Ratio)"]
-        ScaleFull["Scale Down to Max 1800x1800 px"]
-        ScaleThumb["Scale Down to Max 320x320 px"]
+        Scale["Scale / Enlarge to 256x256 px"]
     end
 
     Canvas --> Crop
-    Crop --> ScaleFull --> EncodeFull["toDataURL('image/jpeg', 0.88)"]
-    Crop --> ScaleThumb --> EncodeThumb["toDataURL('image/jpeg', 0.82)"]
+    Crop --> Scale --> Encode["toDataURL('image/jpeg', 0.82)"]
 
-    EncodeFull --> IPC["saveMedia IPC Call"]
-    EncodeThumb --> IPC
-
-    IPC --> DiskWrite["Write .jpg and .thumb.jpg to media/YYYY/MM/"]
+    Encode --> IPC["saveMedia IPC Call"]
+    IPC --> DiskWrite["Write one .jpg to media/YYYY/MM/"]
 ```
 
-- **Storage Efficiency**: Uncompressed 12MP smartphone photos (~5-10MB each) are compressed to ~300KB for full resolution and ~25KB for thumbnails. A year of daily photos fits inside ~120MB.
-- **Fast Calendar Loading**: The calendar view loads exclusively `.thumb.jpg` assets, eliminating memory pressure and frame drops during fast scrolling.
+- **Storage Efficiency**: 12MP smartphone photos (~5-10MB each) are reduced to roughly 15-30KB. A year of daily photos fits inside a few megabytes.
+- **Undecodable Formats**: When Chromium cannot decode the file at all (some camera HEIC variants), the renderer stores it byte-for-byte as it arrived rather than losing the photo. Those entries keep their original extension and are the one case where a stored photo is not a 256px square.
+- **One File Per Photo**: There is no separate `.thumb.jpg` tier. At 256px the stored square is already small enough to serve directly to the calendar and the feed, and a second tier would double the file count an iCloud sync has to reconcile. Journals written by earlier versions may still contain `.thumb.jpg` files; nothing references them, and they are safe to delete.
 
 ### iOS Image Processing Parity (`ImageProcessor.swift`)
 
-On iOS, images picked via `PhotosPicker` or pasted into the composer undergo identical transformations in `ImageProcessor.process(rawImageData:)`:
-1. Uses `UIGraphicsImageRenderer` with format `.scale = 1.0` to perform a centered 1:1 square crop:
+On iOS, images picked via `PhotosPicker` undergo the same transformation in `ImageProcessor.process(rawImageData:)`:
+1. Decodes with `CGImageSourceCreateThumbnailAtIndex` with `kCGImageSourceCreateThumbnailWithTransform: true` to honor EXIF orientation transforms, downsampling appropriately during decode.
+2. Centre-crops to a square with `CGImage.cropping(to:)`:
    $$\text{side} = \min(\text{width}, \text{height}), \quad x = \frac{\text{width} - \text{side}}{2}, \quad y = \frac{\text{height} - \text{side}}{2}$$
-2. Compresses full photo down to max 1800×1800 px with `jpegData(compressionQuality: 0.88)`.
-3. Compresses thumbnail down to max 320×320 px with `jpegData(compressionQuality: 0.82)`.
-4. Saves to the identical `media/YYYY/MM/<uuid>.jpg` and `media/YYYY/MM/<uuid>.thumb.jpg` structure.
+3. Scales the crop to 256×256 px through a `CGContext` at `.high` interpolation (enlarging images with lower dimension < 256, downscaling larger images).
+4. Encodes with `CGImageDestination` at `kCGImageDestinationLossyCompressionQuality = 0.82`.
+5. Saves to `media/YYYY/MM/<uuid>.jpg` — the same single-file layout the Mac writes.
 
 ### Free Cross-Device iCloud Drive Synchronization
 
@@ -604,9 +601,25 @@ DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer xcodebuild \
 ```
 
 #### Executing Automated Verification Suites
-The project includes standalone verification test suites under `ios/Tests/` validating data reciprocity and speech engine continuity:
+The project includes standalone verification test suites under `ios/Tests/` validating data reciprocity and speech engine continuity. The format suite reads the shared fixtures in `spec/fixtures/`, so it must be run from the repository root — see [`docs/FORMAT.md`](FORMAT.md).
 
 ```bash
+Or run all of them at once:
+
+```bash
+./ios/run-tests.sh
+```
+
+Individually:
+
+```bash
+# 0. Verify the entry format against the fixtures the Mac also checks:
+DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer xcrun swiftc \
+  -parse-as-library \
+  ios/Tests/VerifyFormat.swift \
+  ios/Journal/Models/Entry.swift \
+  -o .cache/verify_format && .cache/verify_format
+
 # 1. Verify DictationEngine pause survival, utterance continuity & instant teardown:
 DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer xcrun swiftc \
   -parse-as-library \
@@ -634,7 +647,7 @@ DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer xcrun swiftc \
 
 | Failure Scenario | Root Cause | System Defense / Recovery Mechanism |
 | :--- | :--- | :--- |
-| **Model Load Timeout** | Corrupt weights file or slow disk I/O | Main process maintains a 60s timeout timer (`readyTimer`). If unready, kills child process with `SIGTERM` and displays actionable diagnostic alert. |
+| **Model Load Timeout** | Corrupt weights file or slow disk I/O | The helper reports `ready` *before* loading the model, so talking can begin immediately while the reader thread buffers. The 60s `readyTimer` therefore covers the helper failing to start at all; a model that fails to load afterwards emits `{"type":"error"}`, which the main process forwards to the window as `dictation:failed` so the take is closed rather than left running. |
 | **Microphone Permission Denied** | macOS / iOS TCC privacy restriction | `main.js:ensureMicrophone()` checks `systemPreferences.getMediaAccessStatus('microphone')`. iOS `DictationEngine.requestAuthorization()` requests permission asynchronously. If denied, catches gracefully and prompts user with direct path to System Settings. |
 | **Audio Input Overflow** | Whisper inference pass takes longer than audio ingestion | Audio read loop runs on a detached `std::thread reader` pushing to a thread-safe mutex-guarded queue. Audio is never dropped from `stdin`. |
 | **Canvas Pixel Tainting** | Attempting to read pixels from `journal://` origin | Canvas crops and compresses raw image data *before* converting to `journal://` URLs. Storage returns paths; renderer never reads raw pixels from custom protocols. |

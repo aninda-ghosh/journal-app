@@ -80,12 +80,13 @@ check_tools() {
 
 install_deps() {
   step "Build tools"
-  if [ -d node_modules ]; then
+  if [ -d node_modules ] && [ ! package.json -nt node_modules ]; then
     pass "already installed"
     return 0
   fi
   dim "  installing (slow, once)…"
   if npm install --no-audit --no-fund >/tmp/journal-npm.log 2>&1; then
+    touch node_modules
     pass "installed"
   else
     bad "npm install failed — see /tmp/journal-npm.log"
@@ -115,7 +116,14 @@ build_engine() {
   fi
   pass "whisper.cpp at $(cd native/whisper.cpp && git rev-parse --short HEAD 2>/dev/null || echo 'unknown')"
 
-  if [ -x "$HELPER" ]; then
+  local need_compile=0
+  if [ ! -x "$HELPER" ]; then
+    need_compile=1
+  elif [ native/transcriber.cpp -nt "$HELPER" ] || [ native/CMakeLists.txt -nt "$HELPER" ]; then
+    need_compile=1
+  fi
+
+  if [ "$need_compile" -eq 0 ]; then
     pass "transcriber already built"
   else
     dim "  compiling (several minutes, once)…"
@@ -221,6 +229,9 @@ check_dictation() {
 
 build_app() {
   step "The app"
+  if [ ! -x "$HELPER" ]; then
+    warn "transcriber helper is not built ($HELPER) — the packaged app will not have local dictation"
+  fi
   dim "  packaging…"
 
   if npm run dist >/tmp/journal-dist.log 2>&1; then

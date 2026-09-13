@@ -364,7 +364,13 @@ public class DictationEngine: NSObject, ObservableObject {
     }
 
     private func handleRecognitionResult(result: SFSpeechRecognitionResult?, error: Error?) {
-        guard isRecording else { return }
+        // `.finishing` has to count. stop() ends the audio and then waits a
+        // moment for the last hypothesis to settle — and this guard was quietly
+        // discarding exactly those results, so the final words of a take were
+        // lost and the wait accomplished nothing.
+        var accepting = isRecording
+        if case .finishing = state { accepting = true }
+        guard accepting else { return }
 
         if let result = result {
             let newHypothesis = result.bestTranscription.formattedString.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -397,7 +403,9 @@ public class DictationEngine: NSObject, ObservableObject {
             if isRecording, case .listening = state {
                 // User paused long enough for utterance timeout.
                 // Commit whatever was said and seamlessly restart recognition on the still-running audio tap.
-                if nsError.domain == "kAFAssistantErrorDomain" || nsError.code == 203 || nsError.code == 1110 || nsError.domain == NSCocoaErrorDomain {
+                // Deliberately narrow: matching NSCocoaErrorDomain as well meant
+                // almost any failure restarted recognition, which can loop.
+                if nsError.domain == "kAFAssistantErrorDomain" || nsError.code == 203 || nsError.code == 1110 {
                     commitCurrentHypothesis()
                     updatePublishedText()
                     restartRecognitionTaskIfActive()

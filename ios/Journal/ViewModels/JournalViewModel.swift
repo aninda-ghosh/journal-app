@@ -1,5 +1,6 @@
 import Foundation
 import SwiftUI
+import UIKit
 import Combine
 
 /// Main application view model coordinating data flow between SwiftUI views,
@@ -40,7 +41,30 @@ public class JournalViewModel: ObservableObject {
         }
     }
 
-    @Published public var draft: DraftEntry = DraftEntry()
+    @Published public var draft: DraftEntry = DraftEntry() {
+        didSet { persistDraft() }
+    }
+
+    private static let draftKey = "journal_composer_draft"
+
+    /// An unsaved draft should survive the app being swapped out or killed —
+    /// it only lived in memory before, so a half-written entry died with the
+    /// process. The Mac has kept drafts across a closed window since 1.0.
+    private func persistDraft() {
+        if draft.isEmpty {
+            UserDefaults.standard.removeObject(forKey: JournalViewModel.draftKey)
+        } else if let data = try? JSONEncoder().encode(draft) {
+            UserDefaults.standard.set(data, forKey: JournalViewModel.draftKey)
+        }
+    }
+
+    private static func loadDraft() -> DraftEntry {
+        guard let data = UserDefaults.standard.data(forKey: draftKey),
+              let saved = try? JSONDecoder().decode(DraftEntry.self, from: data) else {
+            return DraftEntry()
+        }
+        return saved
+    }
 
     public enum Tab: String, CaseIterable, Identifiable {
         case write = "Write"
@@ -63,6 +87,7 @@ public class JournalViewModel: ObservableObject {
     public init(storage: JournalStorage = JournalStorage(), dictationEngine: DictationEngine? = nil) {
         self.storage = storage
         self.dictationEngine = dictationEngine ?? DictationEngine()
+        self.draft = JournalViewModel.loadDraft()
         loadEntries()
     }
 
@@ -188,27 +213,81 @@ public class JournalViewModel: ObservableObject {
         }
     }
 
-    /// Preprocesses, center-crops, and saves media data (optimized thumbnail) into the storage directory.
-    public func saveMedia(data: Data, date: Date) throws -> String {
-        let processed = try ImageProcessor.process(rawImageData: data)
-        let (relPath, _) = try storage.saveMedia(photoData: processed.photoData)
-        return relPath
+    /// Centre-crops, scales and saves a picked photo, returning its relative path.
+    ///
+    /// The decode, crop and encode run off the main actor. A 12MP photo is
+    /// enough work to visibly freeze the composer if it happens on the way
+    /// through the UI thread, and importing several at once made it obvious.
+    public func saveMedia(data: Data) async throws -> String {
+        let storage = self.storage
+        return try await Task.detached(priority: .userInitiated) {
+            let processed = try ImageProcessor.process(rawImageData: data)
+            return try storage.saveMedia(photoData: processed.photoData)
+        }.value
     }
 
     /// Resolves an entry's relative photo path (e.g. media/2026/09/uuid.jpg) to a file URL.
     public func resolveMediaURL(relPath: String) -> URL? {
         return storage.resolveMedia(relPath: relPath)
     }
+}
 
-    /// Resolves thumbnail URL for a given photo path.
-    /// If an older entry has a separate `.thumb.jpg` on disk, it returns that.
-    /// Otherwise, it falls back to the saved single `.jpg` photo.
-    public func resolveThumbURL(photoRelPath: String) -> URL? {
-        let thumbRel = photoRelPath.replacingOccurrences(of: #"\.[^./]+$"#, with: ".thumb.jpg", options: .regularExpression)
-        if let thumbURL = storage.resolveMedia(relPath: thumbRel),
-           FileManager.default.fileExists(atPath: thumbURL.path) {
-            return thumbURL
+// MARK: - Photo Loading
+
+/// A small cache in front of the stored photos.
+///
+/// `UIImage(contentsOfFile:)` decodes the file every single time it is called,
+/// and SwiftUI calls `body` often — a month of calendar tiles was decoding up to
+/// 31 JPEGs on the main thread on every redraw, including twice a second while
+/// the dictation clock ticked. This decodes once, off the main thread, and
+/// remembers the result.
+public final class PhotoStore: ObservableObject {
+    public static let shared = PhotoStore()
+
+    private let cache = NSCache<NSString, UIImage>()
+    private let lock = NSLock()
+    private var inFlight: Set<String> = []
+
+    private init() {
+        cache.countLimit = 300
+    }
+
+    /// The decoded photo, or nil while it is still being read from disk.
+    /// Views observing this store are told when it arrives.
+    public func image(at url: URL) -> UIImage? {
+        let key = url.path as NSString
+        if let cached = cache.object(forKey: key) { return cached }
+        beginLoading(url)
+        return nil
+    }
+
+    /// Forget everything — for when the journal folder itself changes.
+    public func empty() {
+        cache.removeAllObjects()
+    }
+
+    private func beginLoading(_ url: URL) {
+        let key = url.path
+
+        lock.lock()
+        let already = inFlight.contains(key)
+        if !already { inFlight.insert(key) }
+        lock.unlock()
+        guard !already else { return }
+
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self = self else { return }
+            let decoded = UIImage(contentsOfFile: url.path)
+            if let decoded = decoded {
+                self.cache.setObject(decoded, forKey: key as NSString)
+            }
+
+            self.lock.lock()
+            self.inFlight.remove(key)
+            self.lock.unlock()
+
+            guard decoded != nil else { return }
+            DispatchQueue.main.async { self.objectWillChange.send() }
         }
-        return storage.resolveMedia(relPath: photoRelPath)
     }
 }

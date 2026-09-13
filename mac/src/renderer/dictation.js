@@ -6,7 +6,7 @@
  * after a wait. Nothing is written to disk: the samples pass through memory,
  * become text, and are gone.
  *
- * 16-bit signed little-endian is what the Swift helper reads, and 16 kHz is
+ * 16-bit signed little-endian is what the transcriber reads, and 16 kHz is
  * what speech recognition wants.
  */
 
@@ -24,7 +24,7 @@ const Dictation = (() => {
   let pendingLength = 0;
   let total = 0;
   let listeners = {};
-  let sending = false;
+  let sending = null;         // the send in flight, so batches queue rather than drop
 
   const isRecording = () => Boolean(context);
 
@@ -43,22 +43,39 @@ const Dictation = (() => {
     return bytes;
   }
 
-  /** Hand a batch to the transcriber. Never let sends pile up on each other. */
-  async function flush() {
-    if (sending || pendingLength === 0) return;
+  /**
+   * Hand a batch to the transcriber.
+   *
+   * Sends are chained rather than skipped: an earlier version returned early
+   * while a send was in flight, which quietly dropped whatever had been said
+   * since — including, at `stop()`, the last quarter-second of the sentence.
+   */
+  function flush() {
+    if (pendingLength === 0) return sending || Promise.resolve();
+
     const blocks = pending;
     const length = pendingLength;
     pending = [];
     pendingLength = 0;
 
-    sending = true;
-    try {
-      await window.journal.dictationAudio(toPcm16(blocks, length));
-    } catch (err) {
-      if (listeners.onError) listeners.onError(err);
-    } finally {
-      sending = false;
+    const handlers = listeners;
+    sending = (sending || Promise.resolve())
+      .then(() => window.journal.dictationAudio(toPcm16(blocks, length)))
+      .catch((err) => { if (handlers.onError) handlers.onError(err); });
+
+    return sending;
+  }
+
+  /** Let go of the microphone and the audio graph, however we got here. */
+  async function release() {
+    try { if (node) node.port.postMessage('stop'); } catch { /* already gone */ }
+    try { if (source) source.disconnect(); } catch { /* already gone */ }
+    try { if (node) node.disconnect(); } catch { /* already gone */ }
+    if (stream) stream.getTracks().forEach((track) => track.stop());
+    if (context && context.state !== 'closed') {
+      try { await context.close(); } catch { /* already closing */ }
     }
+    stream = context = node = source = null;
   }
 
   async function start(handlers = {}) {
@@ -67,6 +84,7 @@ const Dictation = (() => {
     pending = [];
     pendingLength = 0;
     total = 0;
+    sending = null;
 
     let audioConstraints = {
       channelCount: 1,
@@ -75,7 +93,8 @@ const Dictation = (() => {
       autoGainControl: true
     };
 
-    // If AirPods or a Bluetooth microphone is connected to macOS, prioritize it over the built-in mic
+    // If AirPods or a Bluetooth microphone is connected to macOS, prioritize it
+    // over the built-in mic.
     try {
       if (navigator.mediaDevices && navigator.mediaDevices.enumerateDevices) {
         const devices = await navigator.mediaDevices.enumerateDevices();
@@ -92,46 +111,51 @@ const Dictation = (() => {
 
     stream = await navigator.mediaDevices.getUserMedia({ audio: audioConstraints });
 
-    context = new AudioContext({ sampleRate: SAMPLE_RATE });
-    await context.audioWorklet.addModule('pcm-worklet.js');
+    // From here the microphone is live, so any failure has to give it back.
+    // Half-started is worse than not started at all: the recording light stays
+    // on, and isRecording() would say we're listening when nothing is.
+    try {
+      context = new AudioContext({ sampleRate: SAMPLE_RATE });
+      await context.audioWorklet.addModule('pcm-worklet.js');
 
-    source = context.createMediaStreamSource(stream);
-    node = new AudioWorkletNode(context, 'pcm-collector', { numberOfOutputs: 0 });
+      source = context.createMediaStreamSource(stream);
+      node = new AudioWorkletNode(context, 'pcm-collector', { numberOfOutputs: 0 });
 
-    const batchSize = Math.round(context.sampleRate * BATCH_SECONDS);
+      const batchSize = Math.round(context.sampleRate * BATCH_SECONDS);
 
-    node.port.onmessage = ({ data }) => {
-      pending.push(data.samples);
-      pendingLength += data.samples.length;
-      total += data.samples.length;
+      node.port.onmessage = ({ data }) => {
+        pending.push(data.samples);
+        pendingLength += data.samples.length;
+        total += data.samples.length;
 
-      if (listeners.onLevel) listeners.onLevel(data.level);
-      if (listeners.onTime) listeners.onTime(total / context.sampleRate);
+        if (listeners.onLevel) listeners.onLevel(data.level);
+        if (listeners.onTime) listeners.onTime(total / context.sampleRate);
 
-      if (pendingLength >= batchSize) flush();
-    };
+        if (pendingLength >= batchSize) flush();
+      };
 
-    source.connect(node);
+      source.connect(node);
+    } catch (err) {
+      await release();
+      listeners = {};
+      throw err;
+    }
   }
 
   /** Stop capturing and send whatever is left. Returns how long was recorded. */
   async function stop() {
     if (!isRecording()) return null;
 
-    const rate = context.sampleRate;
-    const seconds = total / rate;
+    const seconds = total / context.sampleRate;
 
-    try { node.port.postMessage('stop'); } catch { /* already gone */ }
-    source.disconnect();
-    node.disconnect();
-    stream.getTracks().forEach((track) => track.stop());
-    await context.close();
-
-    stream = context = node = source = null;
-    listeners = {};
-
+    await release();
     await flush();              // the last fraction of a second
+
+    listeners = {};
+    pending = [];
+    pendingLength = 0;
     total = 0;
+    sending = null;
 
     return { seconds };
   }
@@ -139,14 +163,11 @@ const Dictation = (() => {
   /** Abandon the take without transcribing it. */
   async function cancel() {
     if (!isRecording()) return;
-    try { node.port.postMessage('stop'); } catch { /* already gone */ }
-    try { source.disconnect(); node.disconnect(); } catch { /* already gone */ }
-    stream.getTracks().forEach((track) => track.stop());
-    await context.close();
-    stream = context = node = source = null;
+    await release();
     pending = [];
     pendingLength = 0;
     total = 0;
+    sending = null;
     listeners = {};
   }
 

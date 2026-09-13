@@ -154,9 +154,9 @@ public struct CalendarView: View {
     }
 
     private func dayKey(from date: Date) -> String {
-        let formatter = DateFormatter()
-        formatter.dateFormat = "yyyy-MM-dd"
-        return formatter.string(from: date)
+        // A key, not a label: it has to match the ids on disk exactly, so it is
+        // built with the same fixed calendar the entry ids use.
+        return Entry.dayKey(from: date)
     }
 
     private func previousMonth() {
@@ -291,6 +291,7 @@ struct CalendarWeekdayHeaderView: View {
 
 struct CalendarDayCell: View {
     @EnvironmentObject var viewModel: JournalViewModel
+    @ObservedObject private var photos = PhotoStore.shared
     let date: Date
     let isSelected: Bool
     let isToday: Bool
@@ -308,8 +309,8 @@ struct CalendarDayCell: View {
                 JournalTheme.bgRaised
 
                 if let photoPath = repPhotoPath,
-                   let thumbURL = viewModel.resolveThumbURL(photoRelPath: photoPath),
-                   let image = UIImage(contentsOfFile: thumbURL.path) {
+                   let photoURL = viewModel.resolveMediaURL(relPath: photoPath),
+                   let image = photos.image(at: photoURL) {
                     Image(uiImage: image)
                         .resizable()
                         .aspectRatio(contentMode: .fill)
@@ -421,9 +422,7 @@ struct CalendarDayPreviewCard: View {
     }
 
     private func formattedDayHeader(_ dayKey: String) -> String {
-        let inFormatter = DateFormatter()
-        inFormatter.dateFormat = "yyyy-MM-dd"
-        guard let date = inFormatter.date(from: dayKey) else { return dayKey }
+        guard let date = Entry.parseStamp(dayKey) else { return dayKey }
         let outFormatter = DateFormatter()
         outFormatter.dateFormat = "EEEE, MMMM d"
         return outFormatter.string(from: date)
@@ -433,6 +432,7 @@ struct CalendarDayPreviewCard: View {
 /// Concise short glimpse row for CalendarView preview
 struct CalendarEntryGlimpseRow: View {
     @EnvironmentObject var viewModel: JournalViewModel
+    @ObservedObject private var photos = PhotoStore.shared
     let entry: Entry
 
     var body: some View {
@@ -459,7 +459,7 @@ struct CalendarEntryGlimpseRow: View {
                     .lineLimit(1)
 
                 if !entry.body.isEmpty {
-                    Text(entry.body)
+                    Text(JournalMarkdown.rendered(entry.body))
                         .font(JournalTheme.serifProse(13.5))
                         .foregroundColor(JournalTheme.textSoft)
                         .lineLimit(2)
@@ -473,8 +473,8 @@ struct CalendarEntryGlimpseRow: View {
             // Right: Photo Thumbnail (if available) + Navigation Chevron
             HStack(spacing: 8) {
                 if let photoPath = entry.photos.first,
-                   let thumbURL = viewModel.resolveThumbURL(photoRelPath: photoPath),
-                   let image = UIImage(contentsOfFile: thumbURL.path) {
+                   let photoURL = viewModel.resolveMediaURL(relPath: photoPath),
+                   let image = photos.image(at: photoURL) {
                     Image(uiImage: image)
                         .resizable()
                         .aspectRatio(contentMode: .fill)
@@ -496,13 +496,11 @@ struct CalendarEntryGlimpseRow: View {
     }
 
     private func formattedEntryTime(_ rawDate: String) -> String? {
-        let inFormatter = DateFormatter()
-        inFormatter.dateFormat = "yyyy-MM-dd HH:mm:ss"
-        if let date = inFormatter.date(from: rawDate) {
-            let outFormatter = DateFormatter()
-            outFormatter.dateFormat = "h:mm a"
-            return outFormatter.string(from: date)
-        }
-        return nil
+        // Both separator forms, fixed calendar: a Mac-written entry used to show
+        // no time here at all, because only the space form was accepted.
+        guard rawDate.count > 10, let date = Entry.parseStamp(rawDate) else { return nil }
+        let outFormatter = DateFormatter()
+        outFormatter.dateFormat = "h:mm a"
+        return outFormatter.string(from: date)
     }
 }

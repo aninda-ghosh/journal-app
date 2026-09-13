@@ -45,6 +45,37 @@ public struct Entry: Identifiable, Codable, Equatable, Hashable {
         return "\(year)-\(month)-\(day)T\(hour):\(minute):\(second)"
     }
 
+    /// A formatter pinned to the Gregorian calendar and a fixed locale.
+    ///
+    /// Entry timestamps are a wire format shared with the Mac, not something to
+    /// render in the reader's own calendar system. Without pinning, a device set
+    /// to a Buddhist or Japanese calendar writes era years — ids like
+    /// `0008-09-13-142500` — and then fails to read its own files back.
+    public static func fixedFormatter(_ format: String) -> DateFormatter {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.calendar = Calendar(identifier: .gregorian)
+        formatter.dateFormat = format
+        return formatter
+    }
+
+    /// Reads a stored `date` value, in either separator form.
+    ///
+    /// This app writes `2026-09-08T14:30:00`, and so does the Mac. Older iOS
+    /// builds wrote a space instead, so both are accepted — a journal synced
+    /// between two devices should never show a reader a raw timestamp.
+    public static func parseStamp(_ raw: String) -> Date? {
+        for format in ["yyyy-MM-dd'T'HH:mm:ss", "yyyy-MM-dd HH:mm:ss", "yyyy-MM-dd"] {
+            if let date = fixedFormatter(format).date(from: raw) { return date }
+        }
+        return nil
+    }
+
+    /// The 'YYYY-MM-DD' key for a date, in the format entry ids use.
+    public static func dayKey(from date: Date) -> String {
+        return fixedFormatter("yyyy-MM-dd").string(from: date)
+    }
+
     /// Converts a local timestamp into a sortable entry ID: 2026-09-08-143000.
     public static func id(from stamp: String) -> String {
         guard stamp.count >= 19 else { return stamp }
@@ -103,6 +134,11 @@ public struct Entry: Identifiable, Codable, Equatable, Hashable {
     /// Parses raw markdown text into an Entry, matching `mac/src/journal.js:parse`.
     public static func parse(_ raw: String, fallbackId: String) -> Entry {
         var entry = Entry(id: fallbackId, date: "", title: "", tags: [], photos: [], body: "")
+        // `init` helpfully fills an empty date with "now". Parsing must not
+        // invent one: a file with no `date:` line has no date, and the caller
+        // derives it from the id — which is what the Mac does. Without this,
+        // such an entry silently showed up as written today.
+        entry.date = ""
         let text = raw.replacingOccurrences(of: "\r\n", with: "\n")
 
         guard text.hasPrefix("---\n") else {

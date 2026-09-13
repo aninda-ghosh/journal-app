@@ -193,7 +193,7 @@ function connect(url) {
       `window.journal.saveMedia({name:'test.png', photo:'${TINY_PNG}', processed:true})`
     );
     check('photo saves to disk', Boolean(media?.path), media?.path);
-    check('thumbnail file written',
+    check('the photo file is written',
       fs.existsSync(path.join(ROOT, media.path)), media.path);
 
     // --- the journal:// protocol actually serves the image -----------------
@@ -263,7 +263,7 @@ function connect(url) {
     // entry it should lead with the photo from whichever one was written at
     // most length — not just whichever came first.
     const second = await page2.eval(
-      `window.journal.saveMedia({name:'second.png', photo:'${TINY_PNG}', thumb:'${TINY_PNG}', processed:true})`
+      `window.journal.saveMedia({name:'second.png', photo:'${TINY_PNG}', processed:true})`
     );
     await page2.eval(`window.journal.save({
       title: 'The long one',
@@ -294,6 +294,7 @@ function connect(url) {
     check('clicking the day shows both entries', bothShown === 2, `${bothShown} entries listed`);
 
     // --- photos are squared and shrunk on the way in ----------------------
+    // One 256px square per photo, and it is the only copy kept.
     // Bands of colour make it possible to prove the crop is centred rather
     // than merely square: the middle 160px of a 400px-wide image is green, so
     // a correctly centred crop comes out entirely green.
@@ -312,7 +313,7 @@ function connect(url) {
       state.photos = [];
       await addPhotos([file]);
       const p = state.photos[0];
-      return JSON.stringify({ path: p && p.path, thumb: p && p.thumb, bytes: blob.size });
+      return JSON.stringify({ path: p && p.path, bytes: blob.size });
     })()`;
 
     const wide = JSON.parse(await page2.eval(makePhoto(400, 160, true)));
@@ -354,22 +355,25 @@ function connect(url) {
     const big = JSON.parse(await page2.eval(makePhoto(3000, 2200, false)));
     const bigSize = jpegSize(fs.readFileSync(path.join(ROOT, big.path)));
     const bigBytes = fs.statSync(path.join(ROOT, big.path)).size;
-    check('a large photo is capped at 2048px',
-      bigSize && bigSize.width === 2048 && bigSize.height === 2048,
+    check('a large photo is capped at 256px',
+      bigSize && bigSize.width === 256 && bigSize.height === 256,
       bigSize ? `${bigSize.width}x${bigSize.height}` : 'unreadable');
     check('and takes a fraction of the space it arrived with',
       bigBytes < big.bytes,
       `${(big.bytes / 1024).toFixed(0)}KB in, ${(bigBytes / 1024).toFixed(0)}KB stored`);
 
-    const small = JSON.parse(await page2.eval(makePhoto(300, 300, false)));
+    const small = JSON.parse(await page2.eval(makePhoto(200, 200, false)));
     const smallSize = jpegSize(fs.readFileSync(path.join(ROOT, small.path)));
-    check('a small photo is never scaled up',
-      smallSize && smallSize.width === 300, smallSize ? `${smallSize.width}px` : 'unreadable');
+    check('a photo smaller than 256px is enlarged to 256px',
+      smallSize && smallSize.width === 256 && smallSize.height === 256,
+      smallSize ? `${smallSize.width}x${smallSize.height}` : 'unreadable');
 
-    const thumbSize = jpegSize(fs.readFileSync(path.join(ROOT, big.thumb)));
-    check('the browsing copy stays small and square',
-      thumbSize && thumbSize.width === 512 && thumbSize.height === 512,
-      thumbSize ? `${thumbSize.width}x${thumbSize.height}` : 'unreadable');
+    // One tier: the stored square is the only copy of a photo. Nothing should
+    // be writing a second file beside it, and nothing should be asking for one.
+    const strays = fs.readdirSync(path.join(ROOT, path.dirname(big.path)))
+      .filter((name) => name.includes('.thumb.'));
+    check('exactly one file is stored per photo',
+      strays.length === 0, strays.join(', ') || 'no .thumb.jpg written');
 
     await page2.eval('state.photos = []; renderThumbs();');
 

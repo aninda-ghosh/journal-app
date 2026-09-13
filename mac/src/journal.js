@@ -6,8 +6,7 @@
  *
  *   Journal/
  *     entries/2026/09/2026-09-08-143000.md
- *     media/2026/09/<id>.jpg          your original photo, untouched
- *     media/2026/09/<id>.thumb.jpg    small copy, for fast browsing
+ *     media/2026/09/<id>.jpg          one 256px square, the only copy kept
  *
  * The frontmatter is deliberately dumb — flat `key: value` lines, lists as
  * comma-separated values. It stays readable and editable by hand, and needs
@@ -46,6 +45,12 @@ function localStamp(d) {
 /** Entry id: 2026-09-08-143000 — sorts correctly as a plain string. */
 function idFromStamp(stamp) {
   return stamp.slice(0, 10) + '-' + stamp.slice(11).replace(/:/g, '');
+}
+
+/** The inverse: 2026-09-08-143000 -> 2026-09-08T14:30:00. */
+function stampFromId(id) {
+  const t = id.slice(11);
+  return id.slice(0, 10) + 'T' + t.slice(0, 2) + ':' + t.slice(2, 4) + ':' + t.slice(4, 6);
 }
 
 function isValidId(id) {
@@ -174,7 +179,9 @@ async function save(input) {
 
   const entry = {
     id,
-    date: date || localStamp(new Date()),
+    // Saving an existing entry without a date must not silently move it to
+    // now — the id already says when it was written, so ask that instead.
+    date: date || stampFromId(id),
     title: String(input.title || '').replace(/[\r\n]+/g, ' ').trim(),
     tags: (Array.isArray(input.tags) ? input.tags : [])
       .map((t) => String(t).replace(/[,\r\n]/g, ' ').trim().toLowerCase())
@@ -207,16 +214,16 @@ async function remove(id) {
 /**
  * Store a photo.
  *
- * `photo` is normally a square JPEG the renderer has already cropped and
- * scaled down — that squaring is deliberate and lossy, and it's what keeps a
- * journal of daily photographs to a few hundred megabytes a year rather than
- * several gigabytes.
+ * One file per photo, and it is the only copy: `photo` is normally a 256px
+ * square JPEG the renderer has already cropped, scaled and re-encoded. That is
+ * deliberate and lossy — what it buys is a journal of daily photographs that
+ * runs to tens of megabytes a year rather than several gigabytes.
  *
  * When `processed` is false the renderer couldn't decode the file, so it's
  * written exactly as it arrived. Storing a large photo is much better than
  * losing one.
  */
-async function saveMedia({ name, photo, thumb, processed = true }) {
+async function saveMedia({ name, photo, processed = true }) {
   if (!photo) throw new Error('No image data');
 
   const now = new Date();
@@ -238,8 +245,37 @@ async function saveMedia({ name, photo, thumb, processed = true }) {
     Buffer.from(String(photo).split(',').pop(), 'base64')
   );
 
-  // Single-thumbnail pipeline: only store the single optimized file
-  return { path: `media/${year}/${month}/${id}${ext}`, thumb: null };
+  return { path: `media/${year}/${month}/${id}${ext}` };
+}
+
+/**
+ * Photos in the folder that no entry refers to.
+ *
+ * Deleting an entry deliberately leaves its photos alone, so over years they
+ * accumulate — and journals written before the single-file photo pipeline also
+ * left `.thumb.jpg` copies behind. Nothing here deletes anything; it only says
+ * what is unreferenced, so the app can offer to move them to the Trash.
+ */
+async function unusedMedia() {
+  if (!root) return [];
+
+  const referenced = new Set();
+  for (const entry of await readAll()) {
+    for (const photo of entry.photos) referenced.add(photo);
+  }
+
+  const files = await walk(mediaDir(), (name) => !name.startsWith('.'));
+  const unused = [];
+
+  for (const file of files) {
+    const rel = path.relative(root, file).split(path.sep).join('/');
+    if (referenced.has(rel)) continue;
+    let bytes = 0;
+    try { bytes = (await fsp.stat(file)).size; } catch { /* vanished under us */ }
+    unused.push({ path: rel, file, bytes });
+  }
+
+  return unused.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
 }
 
 /** Resolve a stored `media/...` path to a real file, refusing anything else. */
@@ -249,12 +285,16 @@ function resolveMedia(relPath) {
   const full = path.resolve(root, clean);
   const rel = path.relative(root, full);
   if (rel.startsWith('..') || path.isAbsolute(rel)) return null;
+  // ...and still inside media/ once resolved, so `media/../entries/x.md`
+  // can't be served to the window.
+  const inMedia = path.relative(mediaDir(), full);
+  if (inMedia.startsWith('..') || path.isAbsolute(inMedia)) return null;
   return full;
 }
 
 module.exports = {
   setRoot, getRoot, ensureDirs,
-  readAll, save, remove, saveMedia, resolveMedia,
+  readAll, save, remove, saveMedia, resolveMedia, unusedMedia,
   // exported for tests
-  _internals: { parse, serialize, localStamp, idFromStamp, isValidId }
+  _internals: { parse, serialize, localStamp, idFromStamp, stampFromId, isValidId }
 };

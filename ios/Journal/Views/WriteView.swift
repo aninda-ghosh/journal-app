@@ -14,10 +14,13 @@ import PhotosUI
 /// - Quiet filesystem footer with interactive `Move...` link
 public struct WriteView: View {
     @EnvironmentObject var viewModel: JournalViewModel
+    @ObservedObject private var photos = PhotoStore.shared
     @StateObject private var dictation = DictationEngine()
 
     @State private var entryId: String? = nil
     @State private var entryDate: Date = Date()
+    /// The timestamp an edited entry arrived with, so editing never restamps it.
+    @State private var originalDate: String? = nil
     @State private var title: String = ""
     @State private var bodyText: String = ""
     @State private var tags: [String] = []
@@ -38,7 +41,8 @@ public struct WriteView: View {
             _bodyText = State(initialValue: entry.body)
             _tags = State(initialValue: entry.tags)
             _photoPaths = State(initialValue: entry.photos)
-            if let parsedDate = Self.parseDate(entry.date) {
+            _originalDate = State(initialValue: entry.date)
+            if let parsedDate = Entry.parseStamp(entry.date) {
                 _entryDate = State(initialValue: parsedDate)
             }
         }
@@ -124,7 +128,15 @@ public struct WriteView: View {
                                 }
                                 return bodyText
                             },
-                            set: { bodyText = $0 }
+                            set: { newValue in
+                                // While dictating, the field shows body + live
+                                // text. Writing that combined string back would
+                                // re-append the live text on the next redraw, so
+                                // the field is read-only for the take — the same
+                                // thing the Mac does with `readOnly`.
+                                guard !dictation.isRecording else { return }
+                                bodyText = newValue
+                            }
                         ))
                         .font(JournalTheme.serifProse(17))
                         .foregroundColor(JournalTheme.text)
@@ -137,8 +149,8 @@ public struct WriteView: View {
                         ScrollView(.horizontal, showsIndicators: false) {
                             HStack(spacing: 10) {
                                 ForEach(photoPaths, id: \.self) { path in
-                                    if let url = viewModel.resolveThumbURL(photoRelPath: path),
-                                       let image = UIImage(contentsOfFile: url.path) {
+                                    if let url = viewModel.resolveMediaURL(relPath: path),
+                                       let image = photos.image(at: url) {
                                         ZStack(alignment: .topTrailing) {
                                             Image(uiImage: image)
                                                 .resizable()
@@ -252,7 +264,7 @@ public struct WriteView: View {
                             .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
                         }
                         .keyboardShortcut(.return, modifiers: [.command])
-                        .disabled(viewModel.isSaving || (title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && bodyText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && (dictation.isRecording ? dictation.currentText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty : true) && photoPaths.isEmpty))
+                        .disabled(viewModel.isSaving || !canSave)
 
                         Text("Tap to save")
                             .font(.system(size: 12.5))
@@ -349,6 +361,17 @@ public struct WriteView: View {
 
     // MARK: - Actions
 
+    /// Storage needs words or a photo, so the button shouldn't offer less.
+    private var canSave: Bool {
+        if !photoPaths.isEmpty { return true }
+        if !bodyText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return true }
+        if dictation.isRecording,
+           !dictation.currentText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return true
+        }
+        return false
+    }
+
     private var dictationButtonTitle: String {
         if dictation.isRecording {
             return "Listening…"
@@ -398,7 +421,7 @@ public struct WriteView: View {
         for item in items {
             if let data = try? await item.loadTransferable(type: Data.self) {
                 do {
-                    let relPath = try viewModel.saveMedia(data: data, date: entryDate)
+                    let relPath = try await viewModel.saveMedia(data: data)
                     if !photoPaths.contains(relPath) {
                         photoPaths.append(relPath)
                     }
@@ -432,24 +455,30 @@ public struct WriteView: View {
             }
         }
 
-        let formatter = DateFormatter()
-        formatter.dateFormat = "yyyy-MM-dd HH:mm:ss"
-        let dateString = formatter.string(from: entryDate)
-
-        var finalId = entryId
-        if finalId == nil {
-            let idFormatter = DateFormatter()
-            idFormatter.dateFormat = "yyyy-MM-dd-HHmmss"
-            finalId = idFormatter.string(from: entryDate)
-        }
-
-        guard let id = finalId else { return }
-
         let finalTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
         let finalBody = bodyText.trimmingCharacters(in: .whitespacesAndNewlines)
 
-        guard !finalTitle.isEmpty || !finalBody.isEmpty || !photoPaths.isEmpty else {
+        // Storage refuses an entry with no words and no photo. A title alone is
+        // not an entry — say so, rather than failing silently on the way to disk.
+        guard !finalBody.isEmpty || !photoPaths.isEmpty else {
+            viewModel.errorMessage = "An entry needs some words or a photo."
             return
+        }
+
+        let id: String
+        let dateString: String
+        if let existing = entryId {
+            // Editing: the entry keeps the moment it was written.
+            id = existing
+            dateString = originalDate ?? Entry.localStamp(from: entryDate)
+        } else {
+            // New: the day comes from the picker, the time of day from now.
+            // Freezing the time at whenever the composer opened meant two
+            // entries saved one after the other shared an id — and the second
+            // silently replaced the first.
+            let stamp = Entry.localStamp(from: Self.stampedNow(on: entryDate))
+            id = Entry.id(from: stamp)
+            dateString = stamp
         }
 
         let entry = Entry(
@@ -472,6 +501,7 @@ public struct WriteView: View {
                     bodyText = ""
                     photoPaths.removeAll()
                     tags.removeAll()
+                    entryDate = Date()
                     viewModel.draft = JournalViewModel.DraftEntry()
                     viewModel.selectedTab = .calendar
                 }
@@ -481,15 +511,14 @@ public struct WriteView: View {
         }
     }
 
-    private static func parseDate(_ str: String) -> Date? {
-        let formats = ["yyyy-MM-dd HH:mm:ss", "yyyy-MM-dd'T'HH:mm:ss", "yyyy-MM-dd"]
-        let formatter = DateFormatter()
-        for fmt in formats {
-            formatter.dateFormat = fmt
-            if let d = formatter.date(from: str) {
-                return d
-            }
-        }
-        return nil
+    /// The chosen day, carrying the current time of day.
+    private static func stampedNow(on day: Date) -> Date {
+        let cal = Calendar.current
+        var parts = cal.dateComponents([.year, .month, .day], from: day)
+        let now = cal.dateComponents([.hour, .minute, .second], from: Date())
+        parts.hour = now.hour
+        parts.minute = now.minute
+        parts.second = now.second
+        return cal.date(from: parts) ?? day
     }
 }

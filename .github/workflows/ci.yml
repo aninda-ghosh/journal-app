@@ -1,0 +1,68 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  format:
+    name: Entry format (shared fixtures)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      # The one check that keeps the Mac and the iPhone reading the same files.
+      # The Swift half of it runs in the `iphone` job below, over the same
+      # fixtures, so drift between the two fails here rather than on a phone.
+      - run: node mac/tools/format-conformance.js
+
+  desktop:
+    name: Desktop app, end to end
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Install a virtual display
+        run: sudo apt-get update && sudo apt-get install -y xvfb
+      - name: Install build tools
+        run: npm ci --no-audit --no-fund
+        working-directory: mac
+      - run: npm run lint
+        working-directory: mac
+      # Boots the real app under xvfb and drives the actual interface.
+      - run: npm test
+        working-directory: mac
+
+  iphone:
+    name: iPhone app
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verification suites
+        run: ./ios/run-tests.sh
+      - name: Build
+        run: |
+          xcodebuild \
+            -project ios/Journal.xcodeproj \
+            -scheme Journal \
+            -destination "generic/platform=iOS" \
+            -configuration Debug \
+            CODE_SIGNING_ALLOWED=NO \
+            build
+
+  transcriber:
+    name: Speech engine compiles
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Configure
+        run: cmake -S mac/native -B mac/native/build -DCMAKE_BUILD_TYPE=Release
+      - name: Build
+        run: cmake --build mac/native/build -j3 --target transcriber

@@ -92,13 +92,12 @@ Journal/
 └── media/
     └── YYYY/
         └── MM/
-            ├── <uuid>.jpg                  <-- 1800x1800 full-res photo
-            └── <uuid>.thumb.jpg            <-- 320x320 fast-browsing thumbnail
+            └── <uuid>.jpg                  <-- 256x256 square — the stored photo
 ```
 
 Each entry is a plain Markdown file with human-readable frontmatter. Photos are stored locally alongside them. You can read, edit, or back up your journal using TextEdit, Finder, or any tool of your choice.
 
-Photos are automatically center-cropped to 1:1 squares and compressed, keeping a full year of daily photos under ~150 MB.
+Photos are centre-cropped to a 1:1 square, scaled to 256×256 and re-encoded as JPEG on the way in. **That square is the only copy Journal keeps** — the file you picked is not stored alongside it, and the crop cannot be undone, so keep your originals in Photos or wherever you already keep them. What it buys is size: a full year of daily photographs comes to tens of megabytes rather than several gigabytes, which is what makes syncing an entire journal over iCloud Drive practical.
 
 ---
 

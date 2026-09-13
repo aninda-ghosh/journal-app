@@ -45,40 +45,44 @@ struct VerifyImageProcessor {
 
         do {
             // Test 1: Large landscape image (4000 x 3000)
-            // Shortest edge is 3000. It must be cropped to 3000x3000 and scaled to 1800x1800.
+            // Center-cropped and scaled to 256x256.
             let landscapeImage = createTestImage(width: 4000, height: 3000)
             let processedLandscape = try ImageProcessor.process(cgImage: landscapeImage)
 
-            assertEqual(processedLandscape.dimension, 512, "Large photo must scale to photoMaxDimension (512)")
-            assertEqual(processedLandscape.thumbDimension, 512, "Thumbnail dimension matches 512")
+            assertEqual(processedLandscape.dimension, 256, "Large photo must scale to photoMaxDimension (256)")
             assertEqual(processedLandscape.photoData.isEmpty, false, "Photo JPEG data must not be empty")
 
             // Verify JPEG magic bytes (FF D8 FF)
             let photoHeader = [UInt8](processedLandscape.photoData.prefix(3))
             assertEqual(photoHeader, [0xFF, 0xD8, 0xFF], "Photo output must be valid JPEG binary format")
 
-            // Test 2: Portrait image smaller than 512 (400 x 600)
-            // Shortest edge is 400. Since 400 < 512, photo dimension should be exactly 400 (no upscaling).
+            // Test 2: Portrait image (400 x 600)
+            // Center-cropped and scaled to 256x256.
             let portraitImage = createTestImage(width: 400, height: 600)
             let processedPortrait = try ImageProcessor.process(cgImage: portraitImage)
 
-            assertEqual(processedPortrait.dimension, 400, "Image smaller than 512 should retain shortest dimension (400)")
+            assertEqual(processedPortrait.dimension, 256, "Portrait image must scale to photoMaxDimension (256)")
 
-            // Test 3: End-to-end integration with JournalStorage
+            // Test 3: Small image with lower dimension < 256 (150 x 200)
+            // Shortest edge is 150 < 256, so it must enlarge to 256.
+            let smallImage = createTestImage(width: 150, height: 200)
+            let processedSmall = try ImageProcessor.process(cgImage: smallImage)
+            assertEqual(processedSmall.dimension, 256, "Image smaller than 256 must enlarge to 256")
+
+            // Test 4: End-to-end integration with JournalStorage
             let tempDir = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
                 .appendingPathComponent(".cache/test_image_storage", isDirectory: true)
             try? FileManager.default.removeItem(at: tempDir)
 
             let storage = JournalStorage(customRootURL: tempDir)
-            let media = try storage.saveMedia(
+            let mediaPath = try storage.saveMedia(
                 photoData: processedLandscape.photoData,
                 customUUID: "e2e-photo-test"
             )
 
-            assertEqual(media.path.hasSuffix("e2e-photo-test.jpg"), true, "Photo saved with expected filename")
-            assertEqual(media.thumbPath == nil, true, "Separate thumbnail is omitted")
+            assertEqual(mediaPath.hasSuffix("e2e-photo-test.jpg"), true, "Photo saved with expected filename")
 
-            let resolvedPhoto = storage.resolveMedia(relPath: media.path)
+            let resolvedPhoto = storage.resolveMedia(relPath: mediaPath)
             assertEqual(FileManager.default.fileExists(atPath: resolvedPhoto!.path), true, "Saved photo must exist on disk")
 
             // Cleanup

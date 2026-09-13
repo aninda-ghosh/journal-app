@@ -30,7 +30,7 @@
     --text-soft: #a39d96;
     --text-faint: #6f6a66;
     --accent: #d99a72;
-    --accent-soft: #33272020;
+    --accent-soft: #332720;
     --danger: #d8735e;
     --shadow: 0 1px 2px rgba(0, 0, 0, 0.3), 0 4px 20px rgba(0, 0, 0, 0.25);
   }
@@ -55,6 +55,16 @@ body {
 
 button, input, textarea { font-family: inherit; font-size: inherit; color: inherit; }
 button { cursor: pointer; }
+
+/* Keyboard focus has to be visible. Without this, tabbing through the app
+   moves a cursor nobody can see — the calendar alone is 31 buttons.
+   :focus-visible keeps the ring off ordinary mouse clicks. */
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 5px;
+}
+.search input:focus-visible { outline-offset: 1px; }
 
 /* ---------------------------------------------------------------- header */
 
@@ -515,6 +525,8 @@ main {
   box-shadow: var(--shadow);
   padding: 22px 24px;
   margin-bottom: 18px;
+  container-type: inline-size;
+  container-name: entry;
 }
 
 .entry-head {
@@ -551,29 +563,143 @@ main {
   margin: 2px 0 10px;
 }
 
+/* Two-column layout: small image on the left, text on the right */
+
+.entry-content {
+  margin-top: 10px;
+}
+
+.entry-content.has-media {
+  display: flex;
+  flex-direction: row;
+  align-items: flex-start;
+  gap: 22px;
+}
+
+.entry-content.has-media .gallery {
+  flex: 0 0 220px;
+  width: 220px;
+  max-width: 220px;
+  margin: 0;
+}
+
+.entry-content.has-media .gallery.n1 {
+  display: block;
+  width: 220px;
+}
+.entry-content.has-media .gallery.n1 img {
+  width: 220px;
+  height: 220px;
+}
+
+.entry-content.has-media .gallery.n2 {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+  width: 220px;
+}
+.entry-content.has-media .gallery.n2 img {
+  width: 107px;
+  height: 107px;
+  border-radius: 8px;
+}
+
+.entry-content.has-media .gallery.n3,
+.entry-content.has-media .gallery.many {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 6px;
+  width: 220px;
+}
+.entry-content.has-media .gallery.n3 img,
+.entry-content.has-media .gallery.many img {
+  width: 107px;
+  height: 107px;
+  border-radius: 8px;
+}
+
+.entry-content.has-media .entry-main {
+  flex: 1 1 0;
+  min-width: 0;
+}
+
+.entry-content.has-media .entry-main .prose p:first-child {
+  margin-top: 0;
+}
+
+.entry-content:not(.has-media) .entry-main {
+  width: 100%;
+}
+
+/* Responsive: When the card or viewport is narrow, stack vertically with image on top */
+@container entry (max-width: 520px) {
+  .entry-content.has-media {
+    flex-direction: column;
+    gap: 14px;
+  }
+  .entry-content.has-media .gallery {
+    flex: 0 0 auto;
+    width: 100%;
+    max-width: 220px;
+  }
+  .entry-content.has-media .entry-main {
+    width: 100%;
+  }
+}
+
+@media (max-width: 560px) {
+  .entry-content.has-media {
+    flex-direction: column;
+    gap: 14px;
+  }
+  .entry-content.has-media .gallery {
+    flex: 0 0 auto;
+    width: 100%;
+    max-width: 220px;
+  }
+  .entry-content.has-media .entry-main {
+    width: 100%;
+  }
+}
+
 .gallery {
   display: grid;
-  gap: 6px;
+  gap: 8px;
   margin: 14px 0;
   border-radius: var(--radius);
-  overflow: hidden;
 }
-.gallery.n1 { grid-template-columns: 1fr; }
-.gallery.n2 { grid-template-columns: 1fr 1fr; }
-.gallery.n3, .gallery.many { grid-template-columns: repeat(3, 1fr); }
+.gallery.n1 {
+  display: block;
+  max-width: 220px;
+}
+.gallery.n2 {
+  grid-template-columns: repeat(2, minmax(0, 220px));
+  max-width: 448px;
+}
+.gallery.n3, .gallery.many {
+  grid-template-columns: repeat(3, minmax(0, 180px));
+  max-width: 556px;
+}
 
 .gallery img {
   width: 100%;
   height: 100%;
+  aspect-ratio: 1;
   object-fit: cover;
   display: block;
   cursor: zoom-in;
   background: var(--bg-sunken);
+  border: 1px solid var(--border);
+  border-radius: 10px;
   transition: opacity 0.12s;
 }
-.gallery img:hover { opacity: 0.9; }
-.gallery.n1 img { max-height: 520px; }
-.gallery:not(.n1) img { aspect-ratio: 1; }
+.gallery img:hover { opacity: 0.92; }
+.gallery.n1 img {
+  width: 220px;
+  height: 220px;
+  max-width: 100%;
+  aspect-ratio: 1;
+}
 
 .prose {
   font-family: var(--serif);
@@ -581,18 +707,31 @@ main {
   line-height: 1.75;
   color: var(--text);
   overflow-wrap: break-word;
+  text-align: justify;
+  text-justify: inter-word;
+  -webkit-hyphens: auto;
+  hyphens: auto;
 }
-.prose p { margin: 0 0 0.9em; }
+.prose p {
+  margin: 0 0 0.9em;
+  text-align: justify;
+  text-justify: inter-word;
+}
 .prose p:last-child { margin-bottom: 0; }
 .prose h1, .prose h2, .prose h3 {
   font-weight: 600;
   letter-spacing: -0.01em;
   margin: 1.1em 0 0.4em;
+  text-align: left;
 }
 .prose h1 { font-size: 1.35em; }
 .prose h2 { font-size: 1.2em; }
 .prose h3 { font-size: 1.08em; }
-.prose ul, .prose ol { margin: 0 0 0.9em; padding-left: 1.35em; }
+.prose ul, .prose ol {
+  margin: 0 0 0.9em;
+  padding-left: 1.35em;
+  text-align: left;
+}
 .prose li { margin-bottom: 0.25em; }
 .prose blockquote {
   margin: 0 0 0.9em;
@@ -600,6 +739,10 @@ main {
   border-left: 2.5px solid var(--border-strong);
   color: var(--text-soft);
   font-style: italic;
+  text-align: justify;
+}
+.prose pre, .prose code {
+  text-align: left;
 }
 .prose code {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
@@ -645,7 +788,13 @@ footer code {
   animation: fade 0.15s ease;
 }
 @keyframes fade { from { opacity: 0; } to { opacity: 1; } }
-.lightbox img { max-width: 100%; max-height: 100%; object-fit: contain; border-radius: 4px; }
+.lightbox img {
+  max-width: min(90vw, 512px);
+  max-height: min(90vh, 512px);
+  object-fit: contain;
+  border-radius: 8px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.6);
+}
 .lightbox .close {
   position: absolute;
   top: 18px;
@@ -837,4 +986,16 @@ img { -webkit-user-drag: none; }
   background: linear-gradient(to bottom,
     color-mix(in srgb, var(--accent) 4%, transparent), transparent 60px);
   cursor: default;
+}
+
+/* ------------------------------------------------------- reduced motion */
+
+/* Some people get motion sick, and none of the movement here carries meaning. */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
 }

@@ -13,8 +13,6 @@ const { app, BrowserWindow, Menu, dialog, ipcMain, shell, protocol, net, nativeT
 const fs = require('fs');
 const fsp = fs.promises;
 const path = require('path');
-const os = require('os');
-const crypto = require('crypto');
 const { execFile, spawn } = require('child_process');
 const { pathToFileURL } = require('url');
 
@@ -120,17 +118,8 @@ function registerProtocol() {
     // together to recover the stored relative path.
     const url = new URL(request.url);
     const rel = decodeURIComponent(url.host + url.pathname).replace(/^\/+/, '');
-    let file = journal.resolveMedia(rel);
+    const file = journal.resolveMedia(rel);
     if (!file) return new Response('Not found', { status: 404 });
-    // If a thumbnail is requested (e.g. .thumb.jpg) but does not exist on disk,
-    // fallback to the base image (e.g. .jpg) since new entries only save the single thumbnail file.
-    if (!fs.existsSync(file) && /\.thumb\.[^./]+$/.test(rel)) {
-      const fallbackRel = rel.replace(/\.thumb\./, '.');
-      const fallbackFile = journal.resolveMedia(fallbackRel);
-      if (fallbackFile && fs.existsSync(fallbackFile)) {
-        file = fallbackFile;
-      }
-    }
     return net.fetch(pathToFileURL(file).toString());
   });
 }
@@ -155,6 +144,10 @@ function createWindow() {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
       nodeIntegration: false,
+      // The preload only uses contextBridge and ipcRenderer, so the renderer
+      // has no need of Node at all — take it away rather than trust it not to
+      // be reached.
+      sandbox: true,
       spellcheck: true
     }
   });
@@ -388,6 +381,10 @@ function dictationStart(locale) {
           const failure = new Error(message.message || 'Transcription failed.');
           settleReady(failure);
           settleFinal(failure);
+          // The helper says it's ready before the model has finished loading,
+          // so it can still fail once someone is mid-sentence. Say so now,
+          // rather than letting them talk into nothing until they stop.
+          if (dictation === current) toRenderer('dictation:failed', failure.message);
           break;
         }
       }
@@ -417,7 +414,11 @@ function dictationStart(locale) {
       // Closing without a final line still hands back whatever was heard.
       if (current.resolveFinal) settleFinal(null, current.text);
       else settleFinal(failure);
-      if (dictation === current) dictation = null;
+      if (dictation === current) {
+        dictation = null;
+        // Died while still listening — a normal stop has already cleared this.
+        toRenderer('dictation:failed', failure.message);
+      }
     });
 
     // Loading the model off disk is the slow case; longer than this is a hang.
@@ -450,8 +451,10 @@ function dictationStop() {
     // Finishing up after the audio stops should take a moment, not minutes.
     current.finalTimer = setTimeout(() => {
       const text = current.text;
+      // Detach first: endSession rejects any outstanding final promise, which
+      // would throw away the very ramble this timeout exists to rescue.
+      current.resolveFinal = current.rejectFinal = null;
       endSession('Finishing timed out.');
-      // Better to hand back the partial text than to lose the whole ramble.
       resolve({ text });
     }, 45 * 1000);
   }).finally(() => {
@@ -504,6 +507,72 @@ async function ensureMicrophone() {
 }
 
 app.on('before-quit', () => endSession('Quitting.'));
+
+// ------------------------------------------------------- reclaiming photos
+
+/**
+ * Offer to move photos no entry refers to into the Trash.
+ *
+ * Deleting an entry keeps its photos on purpose, so they pile up quietly. The
+ * Trash rather than an unlink: a photograph you can't get back is exactly the
+ * thing this app is careful about everywhere else.
+ */
+async function reclaimPhotos() {
+  let unused;
+  try {
+    unused = await journal.unusedMedia();
+  } catch (err) {
+    await dialog.showMessageBox(win, {
+      type: 'error',
+      message: 'Couldn\'t look through your photos.',
+      detail: err.message
+    });
+    return;
+  }
+
+  if (!unused.length) {
+    await dialog.showMessageBox(win, {
+      type: 'info',
+      message: 'Every photo is still in use.',
+      detail: 'Each photo in your journal folder belongs to an entry, so there is nothing to reclaim.'
+    });
+    return;
+  }
+
+  const megabytes = unused.reduce((sum, item) => sum + item.bytes, 0) / (1024 * 1024);
+  const sample = unused.slice(0, 8).map((item) => '  ' + item.path).join('\n');
+  const andMore = unused.length > 8 ? `\n  …and ${unused.length - 8} more` : '';
+
+  const { response } = await dialog.showMessageBox(win, {
+    type: 'question',
+    buttons: ['Move to Trash', 'Cancel'],
+    defaultId: 1,
+    cancelId: 1,
+    message: `${unused.length} ${unused.length === 1 ? 'photo is' : 'photos are'} not used by any entry.`,
+    detail: `They come to ${megabytes.toFixed(1)} MB.\n\n${sample}${andMore}`
+      + '\n\nThey go to the Trash, not straight to nowhere — you can put them back.'
+  });
+  if (response !== 0) return;
+
+  let moved = 0;
+  const failures = [];
+  for (const item of unused) {
+    try {
+      await shell.trashItem(item.file);
+      moved++;
+    } catch {
+      failures.push(item.path);
+    }
+  }
+
+  await dialog.showMessageBox(win, {
+    type: failures.length ? 'warning' : 'info',
+    message: `Moved ${moved} ${moved === 1 ? 'photo' : 'photos'} to the Trash.`,
+    detail: failures.length
+      ? 'These couldn\'t be moved:\n' + failures.slice(0, 6).join('\n')
+      : ''
+  });
+}
 
 // -------------------------------------------------------------------- menu
 
@@ -567,6 +636,7 @@ function buildMenu() {
           click: () => shell.openPath(journal.getRoot())
         },
         { label: 'Move Journal Folder…', click: () => chooseFolder() },
+        { label: 'Reclaim Unused Photos…', click: () => reclaimPhotos() },
         { type: 'separator' },
         {
           label: 'Check Dictation…',
@@ -669,8 +739,14 @@ if (!app.requestSingleInstanceLock()) {
     await resolveRoot();
 
     // The window may ask for the microphone, and nothing else.
-    session.defaultSession.setPermissionRequestHandler((_wc, permission, callback) => {
-      callback(permission === 'media' || permission === 'audioCapture');
+    session.defaultSession.setPermissionRequestHandler((_wc, permission, callback, details) => {
+      if (permission === 'audioCapture') return callback(true);
+      if (permission === 'media') {
+        // 'media' covers the camera too. Grant it only for audio.
+        const types = (details && details.mediaTypes) || [];
+        return callback(!types.includes('video'));
+      }
+      callback(false);
     });
 
     registerProtocol();

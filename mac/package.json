@@ -1,7 +1,7 @@
 {
   "name": "journal",
   "productName": "Journal",
-  "version": "2.0.0",
+  "version": "2.0.1",
   "description": "A photo journal for macOS that keeps your days in plain files and never touches the internet.",
   "main": "src/main.js",
   "author": "Aninda Ghosh",
@@ -9,6 +9,8 @@
   "scripts": {
     "start": "electron .",
     "test": "node tools/smoke-test.js",
+    "test:format": "node tools/format-conformance.js",
+    "lint": "eslint .",
     "icon": "python3 tools/make-icon.py",
     "dist": "electron-builder --mac --arm64",
     "native": "cmake -S native -B native/build -DCMAKE_BUILD_TYPE=Release && cmake --build native/build -j --target transcriber",
@@ -17,6 +19,7 @@
   "devDependencies": {
     "electron": "^44.3.0",
     "electron-builder": "^26.15.3",
+    "eslint": "^9.39.5",
     "ws": "^8.18.0"
   },
   "build": {

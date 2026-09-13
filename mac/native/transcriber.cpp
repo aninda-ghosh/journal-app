@@ -103,6 +103,13 @@ std::string transcribe(whisper_context* ctx, const std::vector<float>& audio,
     params.n_threads        = threads;
     params.language         = language.c_str();
 
+    // Every pass re-transcribes an overlapping tail. Left to itself whisper
+    // seeds each pass with the previous one's text, and on overlapping audio
+    // that feeds itself: phrases repeat and then run away. Each window here is
+    // judged on its own audio, which is also what whisper.cpp's own streaming
+    // example does.
+    params.no_context       = true;
+
     if (whisper_full(ctx, params, audio.data(), static_cast<int>(audio.size())) != 0) {
         return "";
     }
@@ -214,6 +221,10 @@ int main(int argc, char** argv) {
     whisper_context* ctx = loadModel(model.c_str());
     if (!ctx) {
         emitError("model_failed", "The speech model couldn't be loaded from " + model);
+        // The reader is parked in fread(stdin) and won't come back on its own:
+        // joining would hang, and letting a joinable thread destruct would call
+        // std::terminate. Hand it to the process exit instead.
+        reader.detach();
         return 1;
     }
 
