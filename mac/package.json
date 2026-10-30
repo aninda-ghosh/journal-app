@@ -17,7 +17,7 @@
     "check-dictation": "node tools/whisper-check.js"
   },
   "devDependencies": {
-    "electron": "^44.3.0",
+    "electron": "^44.9.1",
     "electron-builder": "^26.15.3",
     "eslint": "^9.39.5",
     "ws": "^8.18.0"
